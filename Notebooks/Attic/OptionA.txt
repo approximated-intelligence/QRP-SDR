@@ -1,0 +1,604 @@
+OptionA
+November 14, 2026
+[1]: #!/usr/bin/env python3
+"""unified_pa_design_optA.py
+Option A: filters evaluated standalone with R_in = R_opt, R_out = 50 Ohm.
+The Class-E tank is designed analytically (Sokal) and presented to the
+filter as R_opt. No ABCD cascade across the tank/filter boundary.
+Class-E efficiency reference: 93.17% system (GaN.pdf, R_on=400 mOhm, Q_L=3).
+Bench-measure and replace.
+Outputs per band:
+- Tank values (Sokal analytical)
+- Three filter syntheses (LMATCH, JA2GQP, 4Element)
+- S11(f0), S21(f0), 2f0/3f0/4f0/5f0 rejection, FCC margins
+- Overall PA efficiency = eta_ClassE * 10^(S21(f0)/10)
+- Trimmer allocation
+"""
+import numpy as np
+from scipy.optimize import differential_evolution
+# ============================================================
+# Constants
+# ============================================================
+V_DD, P_out, R_ant = 4.85, 1.65, 50.0
+C_OSS_EPC2037 = 12e-12
+# effective at 4.85 V drain (GaN.pdf)
+Q_L = 3.0
+K_R, K_C, K_L = 0.5768, 0.1836, 1.1525
+FCC_LIMIT_DBc = -43.0
+PA_PROFILES = {
+'typical':
+{2: -20, 3: -25, 4: -30, 5: -35},
+'conservative': {2: -30, 3: -40, 4: -50, 5: -60},
+}
+ETA_CLASS_E_SYSTEM = 0.9317
+# GaN.pdf, R_on=400 mOhm, Q_L=3, incl. gate drive
+BANDS = [
+{'name': '20m', 'f0': 14.0e6},
+
+1
+
+{'name': '40m', 'f0': 7.0e6},
+]
+# ============================================================
+# ABCD helpers
+# ============================================================
+def abcd_shunt_c(C, w):
+return np.array([[1, 0], [1j*w*C, 1]], dtype=complex)
+def abcd_series_l(L, w):
+return np.array([[1, 1j*w*L], [0, 1]], dtype=complex)
+def abcd_series_parallel_lc(L, C, w):
+denom = 1 - w**2 * L * C
+Z = 1e9 + 0j if abs(denom) < 1e-14 else (1j*w*L) / denom
+return np.array([[1, Z], [0, 1]], dtype=complex)
+def s_from_abcd(M, R_in, R_out):
+A, B = M[0,0], M[0,1]
+C, D = M[1,0], M[1,1]
+d = A + B/R_out + C*R_in + D*R_in/R_out
+return ((A + B/R_out - C*R_in - D*R_in/R_out) / d,
+2.0 * np.sqrt(R_in/R_out) / d)
+# ============================================================
+# Tank synth (analytical, Sokal)
+# ============================================================
+def synth_class_e(f0, R_opt, C_oss=C_OSS_EPC2037, Q_L=Q_L):
+w0 = 2*np.pi*f0
+C_sh = K_C / (w0 * R_opt)
+L_1 = K_L * R_opt / w0
+L_2 = Q_L * R_opt / w0
+C_2 = 1.0 / (w0**2 * L_2)
+return dict(C_sh=C_sh, C_ext=C_sh - C_oss,
+L_1=L_1, L_2=L_2, C_2=C_2, L_total=L_1 + L_2)
+# ============================================================
+# Filter synthesizers
+# ============================================================
+def synth_lmatch(R_in, R_out, f0):
+Q = np.sqrt(R_out/R_in - 1.0)
+w0 = 2*np.pi*f0
+return dict(Lm=Q*R_in/w0, Cm=Q/(w0*R_out), Q=Q)
+def synth_wb2cba(fc, n_poles=5, ripple_dB=0.1, R=50.0):
+beta = np.log(1.0/np.tanh(ripple_dB/17.37))
+gamma = np.sin(beta/(2*n_poles))
+
+2
+
+g = np.zeros(n_poles+1); g[0] = 1.0
+g[1] = 2*np.sin(np.pi/(2*n_poles))/gamma
+for k in range(2, n_poles+1):
+a = np.sin((2*k-1)*np.pi/(2*n_poles))
+b = np.sin((2*k-3)*np.pi/(2*n_poles))
+g[k] = 4*a*b / (g[k-1]*(gamma**2 + np.sin((k-1)*np.pi/n_poles)**2))
+wc = 2*np.pi*fc
+return dict(C1=g[1]/(wc*R), L2=g[2]*R/wc, C3=g[3]/(wc*R),
+L4=g[4]*R/wc, C5=g[5]/(wc*R), g=g)
+def synth_ja2gqp(R_in, R_out, f0):
+w0, w2, w3 = 2*np.pi*f0, 4*np.pi*f0, 6*np.pi*f0
+def cost(x):
+C1, L2, C3, L4, C5 = x
+C2 = 1.0 / (w2**2 * L2)
+C4 = 1.0 / (w3**2 * L4)
+if C2 < 30e-12 or C4 < 30e-12: return 1e6
+if not (30e-12 < C1 < 1500e-12): return 1e6
+if not (100e-9 < L2 < 1000e-9): return 1e6
+if not (30e-12 < C3 < 1500e-12): return 1e6
+if not (100e-9 < L4 < 500e-9): return 1e6
+if not (30e-12 < C5 < 1500e-12): return 1e6
+def s_at(w):
+M = (abcd_shunt_c(C1, w)
+@ abcd_series_parallel_lc(L2, C2, w)
+@ abcd_shunt_c(C3, w)
+@ abcd_series_parallel_lc(L4, C4, w)
+@ abcd_shunt_c(C5, w))
+return s_from_abcd(M, R_in, R_out)
+S11_f0, S21_f0 = s_at(w0)
+_, S21_2f0 = s_at(w2)
+_, S21_3f0 = s_at(w3)
+return ((1-abs(S21_f0))**2*100 + abs(S11_f0)**2*100
++ abs(S21_2f0)**2*1000 + abs(S21_3f0)**2*1000)
+bounds = [(30e-12, 1000e-12), (100e-9, 900e-9), (30e-12, 1000e-12),
+(100e-9, 500e-9), (30e-12, 1000e-12)]
+r = differential_evolution(cost, bounds, strategy='best1bin',
+popsize=40, maxiter=4000, tol=1e-14,
+seed=42, polish=True, disp=False)
+C1, L2, C3, L4, C5 = r.x
+return dict(C1=C1, L2=L2, C2=1/(w2**2*L2), C3=C3,
+L4=L4, C4=1/(w3**2*L4), C5=C5,
+converged=r.success, cost=r.fun, nit=r.nit)
+def synth_4element(R_in, R_out, f0):
+w0, w2 = 2*np.pi*f0, 4*np.pi*f0
+def cost(x):
+
+3
+
+C1, L2, C3 = x
+C2 = 1.0 / (w2**2 * L2)
+if C2 < 30e-12: return 1e6
+if not (30e-12 < C1 < 2000e-12): return 1e6
+if not (100e-9 < L2 < 3000e-9): return 1e6
+if not (30e-12 < C3 < 2000e-12): return 1e6
+def s_at(w):
+M = (abcd_shunt_c(C1, w)
+@ abcd_series_parallel_lc(L2, C2, w)
+@ abcd_shunt_c(C3, w))
+return s_from_abcd(M, R_in, R_out)
+S11_f0, S21_f0 = s_at(w0)
+_, S21_2f0 = s_at(w2)
+return ((1-abs(S21_f0))**2*100 + abs(S11_f0)**2*100
++ abs(S21_2f0)**2*1000)
+bounds = [(30e-12, 1500e-12), (100e-9, 2000e-9), (30e-12, 1500e-12)]
+r = differential_evolution(cost, bounds, strategy='best1bin',
+popsize=30, maxiter=3000, tol=1e-14,
+seed=42, polish=True, disp=False)
+C1, L2, C3 = r.x
+return dict(C1=C1, L2=L2, C2=1/(w2**2*L2), C3=C3,
+converged=r.success, cost=r.fun, nit=r.nit)
+# ============================================================
+# Filter ABCD (R_in = R_opt, R_out = 50 at the call site)
+# ============================================================
+def filter_abcd(topology, v, w):
+if topology == 'LMATCH':
+return (abcd_series_l(v['Lm'], w)
+@ abcd_shunt_c(v['Cm'], w)
+@ abcd_shunt_c(v['C1'], w)
+@ abcd_series_l(v['L2'], w)
+@ abcd_shunt_c(v['C3'], w)
+@ abcd_series_l(v['L4'], w)
+@ abcd_shunt_c(v['C5'], w))
+if topology == 'JA2GQP':
+return (abcd_shunt_c(v['C1'], w)
+@ abcd_series_parallel_lc(v['L2'], v['C2'], w)
+@ abcd_shunt_c(v['C3'], w)
+@ abcd_series_parallel_lc(v['L4'], v['C4'], w)
+@ abcd_shunt_c(v['C5'], w))
+if topology == '4Element':
+return (abcd_shunt_c(v['C1'], w)
+@ abcd_series_parallel_lc(v['L2'], v['C2'], w)
+@ abcd_shunt_c(v['C3'], w))
+raise ValueError(topology)
+
+4
+
+def evaluate_filter(topology, v, f0, R_opt, R_ant):
+w0 = 2*np.pi*f0
+S11_f0, S21_f0 = s_from_abcd(filter_abcd(topology, v, w0), R_opt, R_ant)
+S11_dB = 20*np.log10(max(abs(S11_f0), 1e-30))
+S21_dB = 20*np.log10(max(abs(S21_f0), 1e-30))
+harm = {}
+for pname, prof in PA_PROFILES.items():
+margins = []
+for n in range(2, 6):
+_, S21n = s_from_abcd(filter_abcd(topology, v, 2*np.pi*n*f0),
+R_opt, R_ant)
+S21_dBc = 20*np.log10(max(abs(S21n), 1e-30)) - S21_dB
+total = prof[n] + S21_dBc
+margin = FCC_LIMIT_DBc - total
+harm[(pname, n)] = dict(S21_dBc=S21_dBc, total_dBc=total,
+margin_dB=margin)
+margins.append(margin)
+harm[f'worst_{pname}'] = min(margins)
+return dict(topology=topology, S11_dB=S11_dB, S21_dB=S21_dB, harm=harm)
+# ============================================================
+# Per-band driver
+# ============================================================
+def design_band(band):
+f0, name = band['f0'], band['name']
+R_opt = K_R * V_DD**2 / P_out
+print(f"\n{'='*80}")
+print(f"{name}
+f0 = {f0/1e6:.2f} MHz
+R_opt = {R_opt:.3f} Ohm")
+print(f"{'='*80}")
+# Tank
+tank = synth_class_e(f0, R_opt)
+print(f"\n[Class-E tank — Sokal analytical, Q_L = {Q_L}]")
+print(f" C_sh(total) = {tank['C_sh']*1e12:7.2f} pF")
+print(f" C_ext(BOM) = {tank['C_ext']*1e12:7.2f} pF
+(trimmer mandatory)")
+print(f" L_1
+= {tank['L_1']*1e9:7.2f} nH
+(Sokal L_ser)")
+print(f" L_2
+= {tank['L_2']*1e9:7.2f} nH
+(tank L)")
+print(f" C_2
+= {tank['C_2']*1e12:7.2f} pF
+(series with L_2)")
+print(f" L_total
+= {tank['L_total']*1e9:7.2f} nH")
+print(f" eta_ClassE = {ETA_CLASS_E_SYSTEM*100:.2f} % (system, incl.␣
+↪gate)")
+# Filters
+lm = {**synth_lmatch(R_opt, R_ant, f0), **synth_wb2cba(fc=1.07*f0)}
+ja = synth_ja2gqp(R_opt, R_ant, f0)
+f4 = synth_4element(R_opt, R_ant, f0)
+
+5
+
+print(f"\n[LMATCH — L-match + WB2CBA]")
+print(f" Lm = {lm['Lm']*1e9:6.1f} nH
+Cm = {lm['Cm']*1e12:6.1f} pF")
+print(f" C1 = {lm['C1']*1e12:6.1f} pF
+L2 = {lm['L2']*1e9:6.1f} nH
+"
+f"C3 = {lm['C3']*1e12:6.1f} pF")
+print(f" L4 = {lm['L4']*1e9:6.1f} nH
+C5 = {lm['C5']*1e12:6.1f} pF")
+print(f"\n[JA2GQP — 2f0 + 3f0 notches, cost={ja['cost']:.2e}]")
+print(f" C1 = {ja['C1']*1e12:6.1f} pF
+"
+f"L2 = {ja['L2']*1e9:6.1f} nH
+C2 = {ja['C2']*1e12:6.1f} pF")
+print(f" C3 = {ja['C3']*1e12:6.1f} pF
+"
+f"L4 = {ja['L4']*1e9:6.1f} nH
+C4 = {ja['C4']*1e12:6.1f} pF")
+print(f" C5 = {ja['C5']*1e12:6.1f} pF")
+print(f"\n[4Element — 2f0 notch, cost={f4['cost']:.2e}]")
+print(f" C1 = {f4['C1']*1e12:6.1f} pF
+"
+f"L2 = {f4['L2']*1e9:6.1f} nH
+C2 = {f4['C2']*1e12:6.1f} pF")
+print(f" C3 = {f4['C3']*1e12:6.1f} pF")
+# Evaluate
+res = {
+'LMATCH':
+evaluate_filter('LMATCH',
+lm, f0, R_opt, R_ant),
+'JA2GQP':
+evaluate_filter('JA2GQP',
+ja, f0, R_opt, R_ant),
+'4Element': evaluate_filter('4Element', f4, f0, R_opt, R_ant),
+}
+print(f"\n[Filter evaluation — R_in = {R_opt:.3f} Ohm, R_out = 50 Ohm]")
+hdr = (f" {'Topology':<10} {'S11(f0)':>9} {'S21(f0)':>9} "
+f"{'S21(2f0)':>10} {'S21(3f0)':>10} "
+f"{'worst typ':>10} {'worst con':>10} {'N':>3}")
+print(hdr)
+print(' ' + '-'*78)
+comps = {'LMATCH': 7, 'JA2GQP': 5, '4Element': 3}
+for tname, r in res.items():
+s2 = r['harm'][('typical',2)]['S21_dBc']
+s3 = r['harm'][('typical',3)]['S21_dBc']
+print(f" {tname:<10} {r['S11_dB']:>8.1f} {r['S21_dB']:>8.3f} "
+f"{s2:>9.1f} {s3:>9.1f} "
+f"{r['harm']['worst_typical']:>+9.1f} "
+f"{r['harm']['worst_conservative']:>+9.1f} "
+f"{comps[tname]:>3}")
+# FCC margin detail (typical PA profile)
+print(f"\n FCC margins vs typical Class-E harmonics (-20/-25/-30/-35 dBc):
+↪")
+print(f" {'Topology':<10} {'2f0':>8} {'3f0':>8} {'4f0':>8} {'5f0':>8}")
+print(' ' + '-'*48)
+for tname, r in res.items():
+
+6
+
+m = [r['harm'][('typical', n)]['margin_dB'] for n in range(2,6)]
+print(f" {tname:<10} {m[0]:>+7.1f} {m[1]:>+7.1f} "
+f"{m[2]:>+7.1f} {m[3]:>+7.1f}")
+# Overall PA efficiency
+print(f"\n[Overall PA efficiency estimate]")
+print(f" eta_ClassE (system) = {ETA_CLASS_E_SYSTEM*100:.2f} %")
+for tname, r in res.items():
+eta_filter = 10**(r['S21_dB']/10)
+eta_total = ETA_CLASS_E_SYSTEM * eta_filter
+print(f" {tname:<10} eta_filter(f0) = {eta_filter*100:6.2f} %
+f"eta_PA = {eta_total*100:6.2f} %")
+
+"
+
+# Trimmer allocation
+print(f"\n[Trimmer allocation — required for tuning]")
+print(f" Tank C_ext
+: mandatory (sets Class-E shunt C)")
+if 'JA2GQP' in res:
+print(f" JA2GQP cell 1 (C1) : recommended (input match)")
+print(f" JA2GQP cell 2 (C2) : mandatory (2f0 notch)")
+print(f" JA2GQP cell 4 (C4) : mandatory (3f0 notch)")
+if '4Element' in res:
+print(f" 4Element cell 1 (C1): recommended (input match)")
+print(f" 4Element cell 2 (C2): mandatory (2f0 notch)")
+if 'LMATCH' in res:
+print(f" LMATCH node (Cm||C1): mandatory (match trim)")
+return dict(band=name, f0=f0, R_opt=R_opt, tank=tank,
+filters={'LMATCH': lm, 'JA2GQP': ja, '4Element': f4},
+results=res)
+# ============================================================
+# Main
+# ============================================================
+if __name__ == '__main__':
+out = [design_band(b) for b in BANDS]
+print(f"\n{'='*80}")
+print("DONE. Tank analytical; filters standalone with R_in = R_opt.")
+print("Overall PA efficiency = eta_ClassE * 10^(S21(f0)/10).")
+print("="*80)
+================================================================================
+20m
+f0 = 14.00 MHz
+R_opt = 8.223 Ohm
+================================================================================
+[Class-E tank — Sokal analytical, Q_L = 3.0]
+C_sh(total) = 253.83 pF
+C_ext(BOM) = 241.83 pF
+(trimmer mandatory)
+7
+
+L_1
+L_2
+C_2
+L_total
+eta_ClassE
+
+= 107.74 nH
+(Sokal L_ser)
+= 280.44 nH
+(tank L)
+= 460.84 pF
+(series with L_2)
+= 388.17 nH
+= 93.17 % (system, incl. gate)
+
+[LMATCH — L-match + WB2CBA]
+Lm = 210.7 nH
+Cm = 512.5 pF
+C1 = 266.3 pF
+L2 = 720.1 nH
+L4 = 720.1 nH
+C5 = 266.3 pF
+
+C3 =
+
+442.0 pF
+
+[JA2GQP — 2f0 + 3f0 notches, cost=1.85e-15]
+C1 = 551.2 pF
+L2 = 145.3 nH
+C2 = 222.4 pF
+C3 = 836.9 pF
+L4 = 412.9 nH
+C4 =
+34.8 pF
+C5 = 220.2 pF
+[4Element — 2f0 notch, cost=9.87e-15]
+C1 = 1222.8 pF
+L2 = 158.2 nH
+C2 =
+C3 = 713.1 pF
+
+204.3 pF
+
+[Filter evaluation — R_in = 8.223 Ohm, R_out = 50 Ohm]
+Topology
+S11(f0)
+S21(f0)
+S21(2f0)
+S21(3f0) worst typ worst con
+N
+-----------------------------------------------------------------------------LMATCH
+-26.8
+-0.009
+-46.2
+-70.3
++23.2
++33.2
+7
+JA2GQP
+-217.5
+-0.000
+-180.5
+-180.2
++35.6
++55.6
+5
+4Element
+-205.3
+-0.000
+-170.1
+-28.8
++10.8
++25.8
+3
+FCC margins vs typical Class-E harmonics (-20/-25/-30/-35 dBc):
+Topology
+2f0
+3f0
+4f0
+5f0
+-----------------------------------------------LMATCH
++23.2
++52.3
++73.2
++90.3
+JA2GQP
++157.5
++162.2
++35.6
++38.4
+4Element
++147.1
++10.8
++16.0
++22.1
+[Overall PA efficiency estimate]
+eta_ClassE (system) = 93.17 %
+LMATCH
+eta_filter(f0) = 99.79 %
+JA2GQP
+eta_filter(f0) = 100.00 %
+4Element
+eta_filter(f0) = 100.00 %
+
+eta_PA =
+eta_PA =
+eta_PA =
+
+92.97 %
+93.17 %
+93.17 %
+
+[Trimmer allocation — required for tuning]
+Tank C_ext
+: mandatory (sets Class-E shunt C)
+JA2GQP cell 1 (C1) : recommended (input match)
+JA2GQP cell 2 (C2) : mandatory (2f0 notch)
+JA2GQP cell 4 (C4) : mandatory (3f0 notch)
+4Element cell 1 (C1): recommended (input match)
+4Element cell 2 (C2): mandatory (2f0 notch)
+LMATCH node (Cm||C1): mandatory (match trim)
+8
+
+================================================================================
+40m
+f0 = 7.00 MHz
+R_opt = 8.223 Ohm
+================================================================================
+[Class-E tank — Sokal analytical, Q_L = 3.0]
+C_sh(total) = 507.66 pF
+C_ext(BOM) = 495.66 pF
+(trimmer mandatory)
+L_1
+= 215.47 nH
+(Sokal L_ser)
+L_2
+= 560.88 nH
+(tank L)
+C_2
+= 921.67 pF
+(series with L_2)
+L_total
+= 776.35 nH
+eta_ClassE = 93.17 % (system, incl. gate)
+[LMATCH — L-match + WB2CBA]
+Lm = 421.4 nH
+Cm = 1025.0 pF
+C1 = 532.6 pF
+L2 = 1440.1 nH
+L4 = 1440.1 nH
+C5 = 532.6 pF
+
+C3 =
+
+884.0 pF
+
+[JA2GQP — 2f0 + 3f0 notches, cost=3.92e-13]
+C1 = 410.0 pF
+L2 = 264.7 nH
+C2 = 488.2 pF
+C3 = 596.7 pF
+L4 = 150.8 nH
+C4 = 381.0 pF
+C5 = 592.2 pF
+[4Element — 2f0 notch, cost=6.69e-14]
+C1 = 471.0 pF
+L2 = 335.6 nH
+C2 =
+C3 = 1042.6 pF
+
+385.0 pF
+
+[Filter evaluation — R_in = 8.223 Ohm, R_out = 50 Ohm]
+Topology
+S11(f0)
+S21(f0)
+S21(2f0)
+S21(3f0) worst typ worst con
+N
+-----------------------------------------------------------------------------LMATCH
+-26.8
+-0.009
+-46.2
+-70.3
++23.2
++33.2
+7
+JA2GQP
+-192.7
+0.000
+-154.1
+-171.6
++14.4
++34.4
+5
+4Element
+-207.4
+-0.000
+-161.7
+-19.0
++1.0
++16.0
+3
+FCC margins vs typical Class-E harmonics (-20/-25/-30/-35 dBc):
+Topology
+2f0
+3f0
+4f0
+5f0
+-----------------------------------------------LMATCH
++23.2
++52.3
++73.2
++90.3
+JA2GQP
++131.1
++153.6
++14.4
++17.7
+4Element
++138.7
++1.0
++5.2
++10.7
+[Overall PA efficiency estimate]
+eta_ClassE (system) = 93.17 %
+LMATCH
+eta_filter(f0) = 99.79 %
+JA2GQP
+eta_filter(f0) = 100.00 %
+4Element
+eta_filter(f0) = 100.00 %
+
+eta_PA =
+eta_PA =
+eta_PA =
+
+9
+
+92.97 %
+93.17 %
+93.17 %
+
+[Trimmer allocation — required for tuning]
+Tank C_ext
+: mandatory (sets Class-E shunt C)
+JA2GQP cell 1 (C1) : recommended (input match)
+JA2GQP cell 2 (C2) : mandatory (2f0 notch)
+JA2GQP cell 4 (C4) : mandatory (3f0 notch)
+4Element cell 1 (C1): recommended (input match)
+4Element cell 2 (C2): mandatory (2f0 notch)
+LMATCH node (Cm||C1): mandatory (match trim)
+================================================================================
+DONE. Tank analytical; filters standalone with R_in = R_opt.
+Overall PA efficiency = eta_ClassE * 10^(S21(f0)/10).
+================================================================================
+
+10
+
+
