@@ -2,7 +2,7 @@
 
 * **Parent Directory:** [`Notebooks/`](../README.md)
 
-This folder contains early single-topology prototypes and exploratory scripts superseded by the three active consolidated notebooks:
+This folder contains early single-topology prototypes and exploratory scripts superseded by the three active consolidated notebooks. Each archived notebook is grouped below by the consolidated notebook that replaces it.
 
 * **Superseded by [`../GaNUnified/GaNUnified.ipynb`](../GaNUnified/GaNUnified.ipynb):**
   * [`ClassE.ipynb`](ClassE.ipynb), [`GaN.ipynb`](GaN.ipynb), [`GaNExtended.ipynb`](GaNExtended.ipynb), [`GaNNonLinear.ipynb`](GaNNonLinear.ipynb), [`GaNFullyNonLinear.ipynb`](GaNFullyNonLinear.ipynb), [`GaNUnified1.ipynb`](GaNUnified1.ipynb), [`GaNUnified2.ipynb`](GaNUnified2.ipynb), [`GaNOpt4.ipynb`](GaNOpt4.ipynb), [`GaNOpt5.ipynb`](GaNOpt5.ipynb), [`GaNSweep.ipynb`](GaNSweep.ipynb)
