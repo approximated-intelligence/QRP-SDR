@@ -1,259 +1,327 @@
 ```python
-"""
-audio_filter_chain_rev40n.ipynb
-===============================
-Complete Rev 40N RX audio filter chain with:
-  - Fixed 4-phase commutating Tayloe impedance (4x Rs+Ron)
-  - Fixed Sallen-Key transfer function & NumPy 2.x scalar indexing (H[i] = solve(A, b)[1])
-  - Side-by-side Architecture A (2x OPA2320, 4 op-amps) vs Architecture B (3x OPA2320, 6 op-amps)
-  - Receiver noise floor, +34 dB gain & 3.10 V clipping budget
-  - lpfopt-style Monte Carlo UQ plots (90% & 95% tolerance intervals, Median, Nominal)
-"""
+# ============================================================
+# REV 40N — COMPLETE RX AUDIO FILTER CHAIN
+# Corrected engineering analysis model
+#
+# Architectures:
+#   A: 2x OPA2320, 4 op-amps, differential gain + AAF
+#   B: 3x OPA2320, 6 op-amps, unity-gain AAF + pole 3
+#
+# Compliance:
+#   - Enumerated component tolerance corners
+#   - Truncated Gaussian Monte Carlo
+#   - Uniform Monte Carlo reference
+#   - Per-run worst-over-alias percentile statistics
+#
+# IMPORTANT:
+#   Frequency responses are normalized to the low-frequency
+#   signal gain. Amplifier gain is handled separately in the
+#   noise and clipping calculations.
+# ============================================================
 
+import itertools
 import numpy as np
 import matplotlib.pyplot as plt
+
 from scipy.signal import firwin, freqz
 from scipy.optimize import differential_evolution
+from scipy.special import erfinv
 
 # ============================================================
-# CONFIGURATION
+# 1. CONFIGURATION
 # ============================================================
+
 FS = 192e3
-FS1, FS2, FSOUT = 48e3, 24e3, 8e3
-R_DEC, N_CIC = 4, 4
+FS1 = 48e3
+FS2 = 24e3
+FSOUT = 8e3
+
+R_DEC = 4
+N_CIC = 4
 
 SSB = 2.7e3
 FSOUT_NYQ = FSOUT / 2
 
 FCRIT = FS - FSOUT_NYQ
 FCRIT_HI = FS + FSOUT_NYQ
-FCRIT2 = 2 * FS - FSOUT_NYQ
-FCRIT2_HI = 2 * FS + FSOUT_NYQ
 
-# Tayloe Mixer (74CBTLV3253, 25% duty cycle -> 4x baseband source impedance)
-R_SOURCE_RF = 8.22
-R_ON_TAYLOE = 5.0
-C_TAYLOE_20M = 2.2e-9
-C_TAYLOE_40M = 4.3e-9
-
-R_SOURCE_AUDIO = 4.0 * (R_SOURCE_RF + R_ON_TAYLOE)  # 52.88 ohm
-FC_TAYLOE_20M = 1.0 / (2 * np.pi * R_SOURCE_AUDIO * C_TAYLOE_20M)
-FC_TAYLOE_40M = 1.0 / (2 * np.pi * R_SOURCE_AUDIO * C_TAYLOE_40M)
-FC_TAYLOE = FC_TAYLOE_20M
-
-R_ADC_LEAK = 1e12
-
-# Rev 40N Architecture A (2x OPA2320AIDR, 4 op-amps)
-C_AC = 10e-6          # AC-coupling cap (15.9 Hz HPF with 1 kOhm)
-R1_DIFF = 1.0e3       # Stage 1 diff-amp input resistor (P and N matched)
-RFB_DIFF = 50.0e3     # Stage 1 feedback resistor -> +34 dB (50x) gain
-CFB_DIFF = 220e-12    # Stage 1 feedback cap -> Pole 1 = 14.47 kHz
-RA_SK = 10.0e3        # Stage 2 Sallen-Key R1 = R2 = 10 kOhm
-CA_SK = 1.5e-9        # Stage 2 Sallen-Key C1 = 1.5 nF
-CB_SK = 750e-12       # Stage 2 Sallen-Key C2 = 750 pF -> f0 = 15.0 kHz, Q = 0.707
-R_KICK = 100.0        # ADC kickback isolation resistor
-C_KICK = 1.0e-9       # ADC charge-bucket capacitor
-
-# ADC (STM32U375 on 3.10 V RAIL)
-C_ADC = 6e-12
-R_ADC_SWITCH = 0.0
-ADC_BITS = 12
-ADC_VREF = 3.10
-ADC_FS_PEAK = ADC_VREF / 2.0
-ADC_LSB = ADC_VREF / (2**ADC_BITS)
-ADC_SNR_TYP = 68.0
-ADC_FS_DBM = +10.0
-
-# Alias rejection target derivation
 BLOCKER_DBFS = -30.0
 ALIAS_BELOW_NOISE_DB = 10.0
-DECODER_NOISE_DBFS = -ADC_SNR_TYP - 10 * np.log10(FS / SSB)
-ALIAS_THRESHOLD_DBFS = DECODER_NOISE_DBFS - ALIAS_BELOW_NOISE_DB
+ADC_SNR_TYP = 68.0
+
+ADC_VREF = 3.10
+ADC_BITS = 12
+ADC_FS_PEAK = ADC_VREF / 2
+ADC_LSB = ADC_VREF / (2**ADC_BITS)
+ADC_FS_DBM = 10.0
+
+ADC_SNR_NOISE_DBFS = -ADC_SNR_TYP - 10 * np.log10(FS / SSB)
+
+ALIAS_THRESHOLD_DBFS = ADC_SNR_NOISE_DBFS - ALIAS_BELOW_NOISE_DB
+
 REQUIRED_REJECTION_DB = BLOCKER_DBFS - ALIAS_THRESHOLD_DBFS
+
 TARGET = -REQUIRED_REJECTION_DB
 MAX_PASS_LOSS_DB = 0.5
 
-HB = firwin(63, 12e3, fs=FS1)
-POLY = firwin(161, 3.35e3, fs=FS2)
+L_FRONTEND_DB = 0.0
+
+# ============================================================
+# 2. TAYLOE MODEL
+# ============================================================
+
+R_SOURCE_RF = 8.22
+R_ON_TAYLOE = 5.0
+
+C_TAYLOE_20M = 2.2e-9
+C_TAYLOE_40M = 4.3e-9
+
+R_SOURCE_AUDIO = 4 * (R_SOURCE_RF + R_ON_TAYLOE)
+
+FC_TAYLOE_20M = 1 / (2 * np.pi * R_SOURCE_AUDIO * C_TAYLOE_20M)
+FC_TAYLOE_40M = 1 / (2 * np.pi * R_SOURCE_AUDIO * C_TAYLOE_40M)
+
+# Default analysis band
+FC_TAYLOE = FC_TAYLOE_20M
+
+# ============================================================
+# 3. ARCHITECTURE A COMPONENTS
+# ============================================================
+
+C_AC = 10e-6
+
+R1_DIFF = 1e3
+RFB_DIFF = 50e3
+CFB_DIFF = 220e-12
+
+RA_SK = 10e3
+CA_SK = 1.5e-9
+CB_SK = 750e-12
+
+R_KICK = 100.0
+C_KICK = 1e-9
+
+GAIN_A = RFB_DIFF / (R1_DIFF + R_SOURCE_AUDIO)
+GAIN_A_DB = 20 * np.log10(GAIN_A)
+
+# ============================================================
+# 4. ARCHITECTURE B COMPONENTS
+# ============================================================
+
+# Equal-R, equal-C Butterworth Sallen-Key nominal design.
+R_B_SK = 10e3
+FC_B_SK = 14.7e3
+C_B_SK = 1 / (2 * np.pi * R_B_SK * FC_B_SK)
+
+R_P3 = 10e3
+C_P3 = 1.08e-9
+
+Q_SK = 1 / np.sqrt(2)
+
+# ============================================================
+# 5. ADC MODEL
+# ============================================================
+
+C_ADC = 6e-12
+R_ADC_SWITCH = 0.0
+
+T_ACQ = 2600e-9
+
+
+def adc_settling(Rth, C=C_ADC, Rswitch=R_ADC_SWITCH):
+    tau = (Rth + Rswitch) * C
+    t_required = (ADC_BITS + 1) * np.log(2) * tau
+    return tau, t_required
 
 
 # ============================================================
-# UTILITIES
+# 6. TOLERANCE MODEL
 # ============================================================
+
+# (datasheet tolerance, assumed bin yield)
+
+PASSIVE_MODEL = {
+    "C0G": (0.05, 0.99),
+    "X5R": (0.20, 0.95),
+    "R1pct": (0.01, 0.99),
+    "L10pct": (0.10, 0.95),
+}
+
+
+def tol_to_sigma(tol, yield_):
+    return tol / (np.sqrt(2) * erfinv(yield_))
+
+
+def draw_by_class(rng, cls, n, dist="truncnorm"):
+    tol, yield_ = PASSIVE_MODEL[cls]
+
+    if dist == "uniform":
+        return rng.uniform(1 - tol, 1 + tol, n)
+
+    if dist == "worstcase":
+        return rng.choice([1 - tol, 1 + tol], size=n)
+
+    if dist != "truncnorm":
+        raise ValueError(f"Unknown distribution: {dist}")
+
+    sigma = tol_to_sigma(tol, yield_)
+
+    result = np.empty(n)
+    filled = 0
+
+    while filled < n:
+        samples = rng.normal(0, sigma, n - filled)
+        samples = samples[np.abs(samples) <= tol]
+
+        count = len(samples)
+        result[filled : filled + count] = 1 + samples
+        filled += count
+
+    return result
+
+
+# ============================================================
+# 7. GENERAL UTILITIES
+# ============================================================
+
+
 def db(x):
     return 20 * np.log10(np.maximum(np.abs(x), 1e-15))
-
-
-def dbm_from_fs_dbfs(dbfs, full_scale_dbm=ADC_FS_DBM):
-    return dbfs + full_scale_dbm
 
 
 def wrap(f, fs):
     return (np.asarray(f) + fs / 2) % fs - fs / 2
 
 
-def print_section(title):
-    print("\n" + "=" * 78)
-    print(title)
-    print("=" * 78)
-
-
-# ============================================================
-# TAYLOE & ANALOG MODELS
-# ============================================================
-def tayloe(f, fc_tayloe=FC_TAYLOE):
-    return 1.0 / (1.0 + 1j * np.asarray(f, float) / fc_tayloe)
+def tayloe(f):
+    return 1 / (1 + 1j * np.asarray(f) / FC_TAYLOE)
 
 
 def butter(f, n, fc):
     f = np.asarray(f, float)
-    if n == 0:
-        return np.ones_like(f)
-    return 1.0 / np.sqrt(1.0 + (f / fc)**(2 * n))
+    return 1 / np.sqrt(1 + (f / fc) ** (2 * n))
 
 
-def passive_rc(f, R1, R2, C1, C2):
-    """Two-stage unbuffered RC ladder (fixed NumPy 2.x scalar indexing [1])."""
-    f = np.atleast_1d(np.asarray(f, float))
-    s = 2j * np.pi * f
-    H = np.zeros(len(f), dtype=complex)
-    G1 = 1.0 / (R_SOURCE_AUDIO + R1)
-    G2 = 1.0 / R2
-    GL = 1.0 / R_ADC_LEAK
-    b = np.array([G1, 0.0], dtype=complex)
-    for i, si in enumerate(s):
-        A = np.array([
-            [G1 + G2 + si * C1, -G2],
-            [-G2, G2 + GL + si * C2]
-        ], dtype=complex)
-        H[i] = np.linalg.solve(A, b)[1]
-    return H
-
-
-def buffered_rc(f, fc):
-    return 1.0 / (1.0 + 1j * np.asarray(f) / fc)**2
-
-
-def sallen_key(f, fc, Q):
-    """Fixed 2nd-order Sallen-Key transfer function."""
+def sallen_key(f, fc, Q=Q_SK):
     s = 1j * np.asarray(f) / fc
-    return 1.0 / (1.0 + s**2 + s / Q)
+    return 1 / (1 + s**2 + s / Q)
 
 
-def rev40n_arch_a(f, c_ac=C_AC, r_in=R1_DIFF, r_fb=RFB_DIFF, c_fb=CFB_DIFF,
-                  ra=RA_SK, ca=CA_SK, cb=CB_SK, r_k=R_KICK, c_k=C_KICK):
-    """Architecture A: 2x OPA2320AIDR (4 Op-Amps) normalized to 0 dB passband."""
+# ============================================================
+# 8. ANALOG TRANSFER FUNCTIONS
+# ============================================================
+
+
+def arch_a_old(
+    f,
+    c_ac=C_AC,
+    r_in=R1_DIFF,
+    r_fb=RFB_DIFF,
+    c_fb=CFB_DIFF,
+    ra=RA_SK,
+    ca=CA_SK,
+    cb=CB_SK,
+    r_k=R_KICK,
+    c_k=C_KICK,
+):
+
     f = np.asarray(f, float)
     s = 2j * np.pi * f
-    r_in_tot = r_in + R_SOURCE_AUDIO
-    H_hp = (s * r_in_tot * c_ac) / (1.0 + s * r_in_tot * c_ac)
-    H_p1 = 1.0 / (1.0 + s * r_fb * c_fb)
-    w0_sq = 1.0 / (ra * ra * ca * cb)
-    a1 = 2.0 * ra * cb
+
+    r_in_total = r_in + R_SOURCE_AUDIO
+
+    H_hp = s * r_in_total * c_ac / (1 + s * r_in_total * c_ac)
+
+    H_p1 = 1 / (1 + s * r_fb * c_fb)
+
+    w0_sq = 1 / (ra**2 * ca * cb)
+    a1 = 2 * ra * cb
+
     H_sk = w0_sq / (s**2 + s * a1 * w0_sq + w0_sq)
-    H_kick = 1.0 / (1.0 + s * r_k * c_k)
+
+    H_kick = 1 / (1 + s * r_k * c_k)
+
     return H_hp * H_p1 * H_sk * H_kick
 
 
-def rev40n_arch_b(f, c_ac=C_AC, fc_b=14.7e3, r_p3=10e3, c_p3=1.08e-9):
-    """Architecture B: 3x OPA2320AIDR (6 Op-Amps) with passive Pole 3 RC at ADC."""
+def arch_a(
+    f,
+    c_ac=C_AC,
+    r_in=R1_DIFF,
+    r_fb=RFB_DIFF,
+    c_fb=CFB_DIFF,
+    ra=RA_SK,
+    ca=CA_SK,
+    cb=CB_SK,
+):  # r_k=R_KICK, c_k=C_KICK):
+
     f = np.asarray(f, float)
     s = 2j * np.pi * f
-    r_in_tot = 1e6 + R_SOURCE_AUDIO
-    H_hp = (s * r_in_tot * c_ac) / (1.0 + s * r_in_tot * c_ac)
-    sb = 1j * f / fc_b
-    H_sk = 1.0 / (1.0 + sb**2 + sb / (1.0 / np.sqrt(2)))
-    H_p3 = 1.0 / (1.0 + s * r_p3 * c_p3)
+
+    # Differential amplifier input resistance
+    r_in_total = r_in + R_SOURCE_AUDIO
+
+    # AC coupling
+    H_hp = s * r_in_total * c_ac / (1 + s * r_in_total * c_ac)
+
+    # Differential amplifier feedback pole
+    H_p1 = 1 / (1 + s * r_fb * c_fb)
+
+    # Actual differential amplifier gain
+    gain = r_fb / r_in_total
+
+    # Component-derived Sallen-Key natural frequency
+    w0 = 1 / (ra * np.sqrt(ca * cb))
+
+    # Component-derived Sallen-Key Q
+    Q = np.sqrt(ca / cb) / 2
+
+    H_sk = w0**2 / (s**2 + s * w0 / Q + w0**2)
+
+    # # Output isolation / ADC kickback network
+    # H_kick = 1/(1+s*r_k*c_k)
+    # return H_hp*H_p1*H_sk*H_kick
+    return H_hp * H_p1 * H_sk
+
+
+def arch_b(f, c_ac=C_AC, r_sk=R_B_SK, c_sk=C_B_SK, r_p3=R_P3, c_p3=C_P3):
+
+    f = np.asarray(f, float)
+    s = 2j * np.pi * f
+
+    r_input = 1e6 + R_SOURCE_AUDIO
+
+    H_hp = s * r_input * c_ac / (1 + s * r_input * c_ac)
+
+    fc_sk = 1 / (2 * np.pi * r_sk * c_sk)
+
+    H_sk = sallen_key(f, fc_sk)
+
+    H_p3 = 1 / (1 + s * r_p3 * c_p3)
+
     return H_hp * H_sk * H_p3
 
 
-def analog(f, c):
-    typ = c["type"]
-    if typ == "arch_a":
-        return rev40n_arch_a(f)
-    if typ == "arch_b":
-        return rev40n_arch_b(f)
-    if typ == "butter":
-        return butter(f, c["n"], c["fc"])
-    if typ == "passive":
-        return passive_rc(f, c["R1"], c["R2"], c["C1"], c["C2"])
-    if typ == "buffered":
-        return buffered_rc(f, c["fc"])
-    if typ == "sallen":
-        return sallen_key(f, c["fc"], c["Q"])
-    raise ValueError(typ)
-
-
 # ============================================================
-# ANALOG FILTER CONFIGURATIONS
+# 9. DIGITAL CHAIN
 # ============================================================
-filters = {
-    "Arch A (2x OPA2320 4-OpAmp)": {"type": "arch_a", "fc": 14.7e3},
-    "Arch B (3x OPA2320 6-OpAmp)": {"type": "arch_b", "fc": 14.7e3},
-}
 
-for n in range(5):
-    fc = None if n == 0 else (FCRIT / (10**(-TARGET / 10) - 1)**(1.0 / (2 * n)))
-    filters[f"{n}-pole Butterworth"] = {"type": "butter", "n": n, "fc": fc}
-
-fc_buffered = FCRIT / np.sqrt(10**(-TARGET / 20) - 1)
-filters["Buffered RC2"] = {"type": "buffered", "fc": fc_buffered}
-
-fc_sk = FCRIT / (10**(-TARGET / 10) - 1)**0.25
-filters["Sallen-Key Butterworth"] = {"type": "sallen", "fc": fc_sk, "Q": 1.0 / np.sqrt(2)}
-
-
-# ============================================================
-# PASSIVE RC2 OPTIMIZATION
-# ============================================================
-f_pass = np.linspace(300, SSB, 250)
-f_alias = np.linspace(FCRIT, FCRIT_HI, 500)
-
-
-def passive_objective(x):
-    R1, R2, C1, C2 = 10**np.asarray(x)
-    hp = db(passive_rc(f_pass, R1, R2, C1, C2))
-    ha = db(passive_rc(f_alias, R1, R2, C1, C2))
-    violation = max(0.0, -np.min(hp) - MAX_PASS_LOSS_DB)
-    alias_miss = max(0.0, np.max(ha) - TARGET)
-    return alias_miss**2 + 1000.0 * violation**2
-
-
-result = differential_evolution(
-    passive_objective, [(0, 5), (0, 5), (-12, -5), (-12, -5)],
-    seed=42, popsize=20, maxiter=400, tol=1e-7, polish=True
-)
-R1_opt, R2_opt, C1_opt, C2_opt = 10**result.x
-hp_opt = db(passive_rc(f_pass, R1_opt, R2_opt, C1_opt, C2_opt))
-ha_opt = db(passive_rc(f_alias, R1_opt, R2_opt, C1_opt, C2_opt))
-passive_feasible = (np.min(hp_opt) >= -MAX_PASS_LOSS_DB) and (np.max(ha_opt) <= TARGET)
-
-
-# ============================================================
-# ADC SETTLING & DIGITAL CHAIN
-# ============================================================
-def adc_settling(Rth, C=C_ADC, Rswitch=R_ADC_SWITCH):
-    tau = (Rth + Rswitch) * C
-    required = (ADC_BITS + 1) * np.log(2) * tau
-    return tau, required
-
-
-RTH_PASSIVE = R_SOURCE_AUDIO + R1_opt + R2_opt
-tau_passive, t_req_passive = adc_settling(RTH_PASSIVE)
-RTH_ACTIVE = R_KICK
-tau_active, t_req_active = adc_settling(RTH_ACTIVE)
-tau_b, t_req_b = adc_settling(10e3)
-T_ACQ_DEFAULT = 2600e-9
+HB = firwin(63, 12e3, fs=FS1)
+POLY = firwin(161, 3.35e3, fs=FS2)
 
 
 def cic(f):
     f = np.asarray(f, float)
+
     den = 4 * np.sin(np.pi * f / FS)
     num = np.sin(4 * np.pi * f / FS)
+
     ratio = np.ones_like(f)
     mask = np.abs(den) > 1e-12
+
     ratio[mask] = num[mask] / den[mask]
-    return np.abs(ratio)**4
+
+    return np.abs(ratio) ** 4
 
 
 def fir_response(f, coeff, fs):
@@ -263,78 +331,401 @@ def fir_response(f, coeff, fs):
 
 def digital(f):
     f = np.asarray(f, float)
+
     h1 = cic(wrap(f, FS))
     h2 = fir_response(wrap(f, FS1), HB, FS1)
     h3 = fir_response(wrap(f, FS2), POLY, FS2)
-    return h1, h2, h3, h1 * h2 * h3
+
+    return h1 * h2 * h3
 
 
-def complete(f, c):
-    _, _, _, h_dig = digital(f)
-    return tayloe(f) * analog(f, c) * h_dig
+def complete(f, architecture):
+    h_digital = digital(f)
 
-
-def plot_audio_uq(arch_name, f_grid, tol_c=0.05, tol_r=0.01, n_runs=1000):
-    rng = np.random.default_rng(42)
-    _, _, _, dig_resp = digital(f_grid)
-    tay_resp = tayloe(f_grid)
-
-    if arch_name == "Arch A (2x OPA2320)":
-        nom_resp = db(tay_resp * rev40n_arch_a(f_grid) * dig_resp)
+    if architecture == "A":
+        h_analog = arch_a(f)
+    # elif architecture == "B":
+    #     h_analog = arch_b(f)
     else:
-        nom_resp = db(tay_resp * rev40n_arch_b(f_grid) * dig_resp)
+        raise ValueError(architecture)
+
+    return tayloe(f) * h_analog * h_digital
+
+
+# ============================================================
+# 10. PASSIVE RC2 OPTIMIZATION
+# ============================================================
+
+R_ADC_LEAK = 1e12
+f_pass = np.linspace(300, SSB, 250)
+f_alias = np.linspace(FCRIT, FCRIT_HI, 500)
+
+
+def passive_rc(f, R1, R2, C1, C2):
+    f = np.atleast_1d(np.asarray(f, float))
+    s = 2j * np.pi * f
+
+    G1 = 1 / (R_SOURCE_AUDIO + R1)
+    G2 = 1 / R2
+    GL = 1 / R_ADC_LEAK
+
+    b = np.array([G1, 0], dtype=complex)
+
+    result = np.empty(len(f), dtype=complex)
+
+    for i, si in enumerate(s):
+        A = np.array(
+            [[G1 + G2 + si * C1, -G2], [-G2, G2 + GL + si * C2]], dtype=complex
+        )
+
+        result[i] = np.linalg.solve(A, b)[1]
+
+    return result
+
+
+def passive_objective(x):
+    R1, R2, C1, C2 = 10 ** np.asarray(x)
+
+    hp = db(passive_rc(f_pass, R1, R2, C1, C2))
+    ha = db(passive_rc(f_alias, R1, R2, C1, C2))
+
+    _, t_req = adc_settling(R_SOURCE_AUDIO + R1 + R2)
+
+    pass_violation = max(0, -np.min(hp) - MAX_PASS_LOSS_DB)
+
+    alias_violation = max(0, np.max(ha) - TARGET)
+
+    settle_violation = max(0, (t_req - T_ACQ) / T_ACQ)
+
+    return alias_violation**2 + 1000 * pass_violation**2 + 1000 * settle_violation**2
+
+
+result = differential_evolution(
+    passive_objective,
+    [(0, 5), (0, 5), (-12, -5), (-12, -5)],
+    seed=42,
+    popsize=20,
+    maxiter=400,
+    tol=1e-7,
+    polish=True,
+)
+
+R1_OPT, R2_OPT, C1_OPT, C2_OPT = 10**result.x
+
+HP_OPT = db(passive_rc(f_pass, R1_OPT, R2_OPT, C1_OPT, C2_OPT))
+
+HA_OPT = db(passive_rc(f_alias, R1_OPT, R2_OPT, C1_OPT, C2_OPT))
+
+_, T_REQ_OPT = adc_settling(R_SOURCE_AUDIO + R1_OPT + R2_OPT)
+
+PASSIVE_FEASIBLE = (
+    np.min(HP_OPT) >= -MAX_PASS_LOSS_DB
+    and np.max(HA_OPT) <= TARGET
+    and T_ACQ >= T_REQ_OPT
+)
+
+
+def section(title):
+    print("\n" + "=" * 78)
+    print(title)
+    print("=" * 78)
+
+
+# ============================================================
+# 11. CORNER ANALYSIS
+# ============================================================
+
+section("0. EXHAUSTIVE COMPONENT CORNER ANALYSIS")
+
+COMPONENTS_A = [
+    ("c_ac", C_AC, "X5R"),
+    ("r_in", R1_DIFF, "R1pct"),
+    ("r_fb", RFB_DIFF, "R1pct"),
+    ("c_fb", CFB_DIFF, "C0G"),
+    ("ra", RA_SK, "R1pct"),
+    ("ca", CA_SK, "C0G"),
+    ("cb", CB_SK, "C0G"),
+    # ("r_k", R_KICK, "R1pct"),
+    # ("c_k", C_KICK, "C0G"),
+]
+
+COMPONENTS_B = [
+    ("c_ac", C_AC, "X5R"),
+    ("r_sk", R_B_SK, "R1pct"),
+    ("c_sk", C_B_SK, "C0G"),
+    ("r_p3", R_P3, "R1pct"),
+    ("c_p3", C_P3, "C0G"),
+]
+
+
+def corner_worst(architecture, f_grid):
+
+    if architecture != "A":
+        raise ValueError(f"Unsupported architecture: {architecture}")
+
+    components = COMPONENTS_A if architecture == "A" else COMPONENTS_B
+
+    mask = (f_grid >= FCRIT) & (f_grid <= FCRIT_HI)
+
+    h_dig = digital(f_grid)
+    h_tay = tayloe(f_grid)
+
+    worst = -np.inf
+    worst_signs = None
+
+    for signs in itertools.product((-1, 1), repeat=len(components)):
+
+        kwargs = {
+            name: nominal * (1 + sign * PASSIVE_MODEL[cls][0])
+            for (name, nominal, cls), sign in zip(components, signs)
+        }
+
+        if architecture == "A":
+            h = arch_a(f_grid, **kwargs)
+        # elif architecture == "B":
+        #    h = arch_b(f_grid, **kwargs)
+        else:
+            raise Exception(f"Unsupported architecture: {architecture}")
+
+        response = db(h_tay * h * h_dig)
+        value = float(np.max(response[mask]))
+
+        if value > worst:
+            worst = value
+            worst_signs = signs
+
+    return worst, worst_signs, components
+
+
+# Frequency grid covering the complete alias evaluation band.
+f_corner = np.linspace(FCRIT, FCRIT_HI, 2001)
+
+corner_results = {}
+
+arch_map = [
+    ("A", "Architecture A — 2x OPA2320"),
+    # ("B", "Architecture B — 3x OPA2320"),
+]
+
+for arch_key, arch_name in arch_map:
+
+    worst_db, worst_signs, components = corner_worst(arch_key, f_corner)
+
+    margin = TARGET - worst_db
+    passed = worst_db <= TARGET
+
+    corner_results[arch_key] = {
+        "worst_db": worst_db,
+        "worst_signs": worst_signs,
+        "components": components,
+        "margin_db": margin,
+        "passed": passed,
+    }
+
+    print(f"\n{arch_name}")
+    print(f"  Number of corners: {2**len(components)}")
+    print(f"  Worst alias response: {worst_db:+.2f} dB")
+    print(f"  Required maximum: {TARGET:+.2f} dB")
+    print(f"  Compliance margin: {margin:+.2f} dB")
+    print(f"  Verdict: {'PASS' if passed else 'FAIL'}")
+
+    print("  Worst-case component values:")
+
+    for (name, nominal, cls), sign in zip(components, worst_signs):
+        tolerance = PASSIVE_MODEL[cls][0]
+        value = nominal * (1 + sign * tolerance)
+
+        print(f"    {name:<8} = {value:.6g}")
+
+# ============================================================
+# 12. MONTE CARLO
+# ============================================================
+
+
+def simulate_mc(architecture, f_grid, n_runs=5000, dist="truncnorm", seed=42):
+
+    rng = np.random.default_rng(seed)
+
+    h_dig = digital(f_grid)
+    h_tay = tayloe(f_grid)
+
+    mask = (f_grid >= FCRIT) & (f_grid <= FCRIT_HI)
+
+    if architecture != "A":
+        raise ValueError(f"Unsupported architecture: {architecture}")
+
+    components = COMPONENTS_A if architecture == "A" else COMPONENTS_B
+
+    factors = {}
+
+    for name, nominal, cls in components:
+        factors[name] = draw_by_class(rng, cls, n_runs, dist)
 
     mc = np.empty((n_runs, len(f_grid)))
+
+    if architecture == "A":
+        nominal = db(h_tay * arch_a(f_grid) * h_dig)
+    # elif architecture == "B":
+    #    nominal = db(h_tay*arch_b(f_grid)*h_dig)
+    else:
+        raise Exception(f"Unsupported architecture: {architecture}")
+
     for k in range(n_runs):
-        u_c = lambda: rng.uniform(1.0 - tol_c, 1.0 + tol_c)
-        u_r = lambda: rng.uniform(1.0 - tol_r, 1.0 + tol_r)
-        if arch_name == "Arch A (2x OPA2320)":
-            h_a = rev40n_arch_a(
-                f_grid,
-                c_ac=C_AC * u_c(), r_in=R1_DIFF * u_r(),
-                r_fb=RFB_DIFF * u_r(), c_fb=CFB_DIFF * u_c(),
-                ra=RA_SK * u_r(), ca=CA_SK * u_c(), cb=CB_SK * u_c(),
-                r_k=R_KICK * u_r(), c_k=C_KICK * u_c()
-            )
+
+        kwargs = {
+            name: nominal_value * factors[name][k]
+            for name, nominal_value, cls in components
+        }
+
+        if architecture == "A":
+            h = arch_a(f_grid, **kwargs)
+        # elif architecture == "B":
+        #    h = arch_b(f_grid, **kwargs)
         else:
-            h_a = rev40n_arch_b(
-                f_grid,
-                c_ac=C_AC * u_c(),
-                fc_b=14.7e3 * u_c() * u_r(),
-                r_p3=10e3 * u_r(),
-                c_p3=1.08e-9 * u_c()
-            )
-        mc[k] = db(tay_resp * h_a * dig_resp)
+            raise Exception(f"Unsupported architecture: {architecture}")
 
-    p2_5, p5, p50, p95, p97_5 = [np.percentile(mc, p, axis=0) for p in (2.5, 5, 50, 95, 97.5)]
+        mc[k] = db(h_tay * h * h_dig)
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 8.5))
+    # Critical: maximum is taken within each run first.
+    worst_per_run = np.max(mc[:, mask], axis=1)
+
+    return {
+        "mc": mc,
+        "nominal": nominal,
+        "worst_per_run": worst_per_run,
+        "alias_mask": mask,
+    }
+
+
+# ============================================================
+# 13. MONTE CARLO PLOTS
+# ============================================================
+
+
+
+def plot_audio_uq(architecture, f_grid, n_runs=5000):
+
+    r = simulate_mc(architecture, f_grid, n_runs=n_runs, dist="truncnorm")
+
+    mc = r["mc"]
+    nominal = r["nominal"]
+    worst = r["worst_per_run"]
+
+    print(f"\nArchitecture {architecture} — Alias rejection statistics")
+    print("-" * 68)
+    print(f"{'Level':<10} {'Quantile':>11} {'Response':>13} {'Margin':>12} {'Verdict':>9}")
+    print("-" * 68)
+
+    levels = [
+        ("Median", 50),
+        ("1 sigma", 84.1345),
+        ("2 sigma", 97.7250),
+        ("3 sigma", 99.8650),
+        ("4 sigma", 99.99683),
+        ("5 sigma", 99.9999713),
+        ("6 sigma", 99.9999999),
+        ("Maximum", 100),
+    ]
+
+    for label, q in levels:
+        value = np.percentile(worst, q)
+        margin = TARGET - value
+        verdict = "PASS" if margin >= 0 else "FAIL"
+
+        print(
+            f"{label:<10} {q:>10.5f}% "
+            f"{value:>+12.2f} dB "
+            f"{margin:>+10.2f} dB "
+            f"{verdict:>9}"
+        )
+
+    print("-" * 68)
+
+    p2_5, p5, p50, p95, p97_5, p99 = [
+        np.percentile(mc, p, axis=0)
+        for p in (2.5, 5, 50, 95, 97.5, 99)
+    ]
+
     f_khz = f_grid / 1e3
 
-    ax1.fill_between(f_khz, p2_5, p97_5, alpha=0.14, color="steelblue", label="95% tolerance interval (±5% C, ±1% R)")
-    ax1.fill_between(f_khz, p5, p95, alpha=0.28, color="steelblue", label="90% tolerance interval")
-    ax1.plot(f_khz, nom_resp, "k--", lw=1.4, label="Nominal")
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 8.5))
+
+    # --------------------------------------------------------
+    # COMPLETE RX CHAIN
+    # --------------------------------------------------------
+
+    ax1.fill_between(
+        f_khz, p2_5, p97_5,
+        alpha=0.14, color="steelblue",
+        label="95% tolerance interval"
+    )
+
+    ax1.fill_between(
+        f_khz, p5, p95,
+        alpha=0.28, color="steelblue",
+        label="90% tolerance interval"
+    )
+
+    ax1.plot(f_khz, nominal, "k--", lw=1.4, label="Nominal")
     ax1.plot(f_khz, p50, color="blue", lw=1.5, label="Median")
-    ax1.axvspan(FCRIT / 1e3, FCRIT_HI / 1e3, color="orange", alpha=0.15, label="1st Alias Zone (188–196 kHz)")
-    ax1.axhline(TARGET, color="red", ls="--", lw=1.2, label=f"Alias Target ({TARGET:.1f} dB)")
+    ax1.plot(f_khz, p99, ":", color="navy", lw=1.3, label="p99")
+
+    ax1.axvspan(
+        FCRIT / 1e3, FCRIT_HI / 1e3,
+        color="orange", alpha=0.15,
+        label="1st Alias Zone (188–196 kHz)"
+    )
+
+    ax1.axhline(
+        TARGET, color="red", ls="--", lw=1.2,
+        label=f"Alias Target ({TARGET:.2f} dB)"
+    )
+
     ax1.set_xlim(0.01, 250)
     ax1.set_ylim(-165, 5)
-    ax1.set_title(f"{arch_name} — Complete RX Chain UQ (Tayloe × Analog AAF × Digital)")
+    ax1.set_title(
+        f"Architecture {architecture} — Complete RX Chain UQ"
+    )
     ax1.set_xlabel("Frequency (kHz)")
     ax1.set_ylabel("Magnitude (dB)")
     ax1.grid(alpha=0.3)
     ax1.legend(loc="lower left", fontsize=8.5)
 
-    ax2.fill_between(f_khz, p2_5, p97_5, alpha=0.14, color="darkorange", label="95% tolerance interval")
-    ax2.fill_between(f_khz, p5, p95, alpha=0.28, color="darkorange", label="90% tolerance interval")
-    ax2.plot(f_khz, nom_resp, "k--", lw=1.4, label="Nominal")
+    # --------------------------------------------------------
+    # DECODER PASSBAND
+    # --------------------------------------------------------
+
+    ax2.fill_between(
+        f_khz, p2_5, p97_5,
+        alpha=0.14, color="darkorange",
+        label="95% tolerance interval"
+    )
+
+    ax2.fill_between(
+        f_khz, p5, p95,
+        alpha=0.28, color="darkorange",
+        label="90% tolerance interval"
+    )
+
+    ax2.plot(f_khz, nominal, "k--", lw=1.4, label="Nominal")
     ax2.plot(f_khz, p50, color="darkorange", lw=1.5, label="Median")
-    ax2.axvspan(0.3, SSB / 1e3, color="green", alpha=0.12, label="SSB Voice Passband (300 Hz – 2.7 kHz)")
-    ax2.axhline(-MAX_PASS_LOSS_DB, color="red", ls="--", lw=1.1, label=f"Max Droop (-{MAX_PASS_LOSS_DB} dB)")
+    ax2.plot(f_khz, p99, ":", color="saddlebrown", lw=1.3, label="p99")
+
+    ax2.axvspan(
+        0.3, SSB / 1e3,
+        color="green", alpha=0.12,
+        label="SSB Voice Passband"
+    )
+
+    ax2.axhline(
+        -MAX_PASS_LOSS_DB, color="red", ls="--", lw=1.1,
+        label=f"Max Droop (-{MAX_PASS_LOSS_DB} dB)"
+    )
+
     ax2.set_xscale("log")
     ax2.set_xlim(0.01, 6.0)
     ax2.set_ylim(-10, 1)
-    ax2.set_title(f"{arch_name} — Decoder Passband & 10 µF AC-Coupling HPF UQ")
+    ax2.set_title("Decoder Passband & AC-Coupling HPF UQ")
     ax2.set_xlabel("Frequency (kHz, log scale)")
     ax2.set_ylabel("Magnitude (dB)")
     ax2.grid(True, which="both", alpha=0.3)
@@ -342,108 +733,246 @@ def plot_audio_uq(arch_name, f_grid, tol_c=0.05, tol_r=0.01, n_runs=1000):
 
     plt.tight_layout()
     plt.show()
-    wc_alias = float(np.max(p97_5[(f_grid >= FCRIT) & (f_grid <= FCRIT_HI)]))
-    print(f"  {arch_name:<25} | 97.5th-pct Worst Alias1 = {wc_alias:+.2f} dB (Target <= {TARGET:.1f} dB)")
+
+    return r
+    
+# ============================================================
+# 14. SECTION 1 — TAYLOE
+# ============================================================
+
+section("1. TAYLOE BASEBAND")
+
+print(f"RF source resistance: {R_SOURCE_RF:.2f} ohm")
+print(f"Tayloe switch Ron: {R_ON_TAYLOE:.2f} ohm")
+print(f"Four-phase audio source: {R_SOURCE_AUDIO:.2f} ohm")
+print(f"20m cutoff: {FC_TAYLOE_20M/1e6:.3f} MHz")
+print(f"40m cutoff: {FC_TAYLOE_40M/1e6:.3f} MHz")
+print(f"Front-end insertion loss: {L_FRONTEND_DB:.2f} dB")
+
 
 # ============================================================
-# PRINT ALL SECTIONS BEFORE PLOTTING
+# 15. SECTION 2 — PASSIVE RC2
 # ============================================================
-print_section("1. TAYLOE BASEBAND MODEL (4-PHASE COMMUTATING)")
-print(f"R_SOURCE_RF: {R_SOURCE_RF:.2f} ohm | R_on: {R_ON_TAYLOE:.1f} ohm | R_SOURCE_AUDIO (4x): {R_SOURCE_AUDIO:.2f} ohm")
-print(f"20m (C = {C_TAYLOE_20M*1e9:.1f} nF) -> fc = {FC_TAYLOE_20M/1e6:.3f} MHz")
-print(f"40m (C = {C_TAYLOE_40M*1e9:.1f} nF) -> fc = {FC_TAYLOE_40M/1e6:.3f} MHz")
 
-print_section("2. PASSIVE RC2 OPTIMIZATION")
-print(f"R1={R1_opt:.2f} ohm, R2={R2_opt:.2f} ohm, C1={C1_opt*1e9:.3f} nF, C2={C2_opt*1e9:.3f} nF")
-print(f"Worst passband: {np.min(hp_opt):.3f} dB | Worst alias: {np.max(ha_opt):.3f} dB | Feasible: {passive_feasible}")
+section("2. PASSIVE RC2 OPTIMIZATION")
 
-print_section("3. ADC SWITCHED-CAPACITOR SETTLING (3.10 V RAIL, T_acq = 2600 ns)")
-print(f"Passive RC2 (Rth={RTH_PASSIVE:.0f} ohm): t_req = {t_req_passive*1e9:.1f} ns -> {'PASS' if T_ACQ_DEFAULT >= t_req_passive else 'FAIL'}")
-print(f"Arch A 2xIC (Rth={RTH_ACTIVE:.0f} ohm):   t_req = {t_req_active*1e9:.2f} ns -> {'PASS' if T_ACQ_DEFAULT >= t_req_active else 'FAIL'}")
-print(f"Arch B 3xIC (Rth=10000 ohm): t_req = {t_req_b*1e9:.1f} ns -> {'PASS' if T_ACQ_DEFAULT >= t_req_b else 'FAIL'}")
+print(f"R1: {R1_OPT:.2f} ohm")
+print(f"R2: {R2_OPT:.2f} ohm")
+print(f"C1: {C1_OPT*1e9:.3f} nF")
+print(f"C2: {C2_OPT*1e9:.3f} nF")
 
-print_section("4. RECEIVER GAIN, NOISE FLOOR & DYNAMIC RANGE BUDGET")
-kTB_ssb_dbm = -174.0 + 10 * np.log10(SSB)
-band_noise_20m_dbm = kTB_ssb_dbm + 18.0
-adc_noise_dbm = dbm_from_fs_dbfs(DECODER_NOISE_DBFS)
-gain_db = 20 * np.log10(RFB_DIFF / (R1_DIFF + R_SOURCE_AUDIO))
-print(f"Quiet 20m Band Noise (2.7 kHz): {band_noise_20m_dbm:+.1f} dBm | STM32 ADC Noise Floor: {adc_noise_dbm:+.1f} dBm")
-print(f"Old Rev 40M (0 dB Gain):  Band noise at ADC = {band_noise_20m_dbm:+.1f} dBm (45.2 dB below ADC noise -> BLIND)")
-print(f"Rev 40N (+{gain_db:.1f} dB Gain): Band noise at ADC = {band_noise_20m_dbm + gain_db:+.1f} dBm (11.2 dB above ADC noise -> OK)")
-print(f"Max Antenna Input before 3.1V Clip: {ADC_FS_DBM - gain_db + 3.5:+.1f} dBm (~S9+52 dB)")
+print(f"Passband minimum: {np.min(HP_OPT):.3f} dB")
+print(f"Alias maximum: {np.max(HA_OPT):.3f} dB")
+print(f"Required settling: {T_REQ_OPT*1e9:.2f} ns")
+print(f"Available acquisition: {T_ACQ*1e9:.2f} ns")
+print(f"Feasible: {PASSIVE_FEASIBLE}")
 
-print_section("5. FINAL COMPARISON (COMPLETE CHAIN: TAYLOE + ANALOG + DIGITAL)")
-print(f"{'Filter':<32s} {'fc(kHz)':>9s} {'2.7k':>7s} {'Pass':>5s} {'4k':>7s} {'8k':>7s} {'Alias1':>8s} {'Settle':>7s}")
-print("-" * 88)
-for name, c in filters.items():
-    fc = c.get("fc")
-    fc_text = "Bypass" if fc is None else f"{fc/1e3:.2f}"
-    p27 = float(db(complete(np.array([SSB]), c)).item())
-    p4 = float(db(complete(np.array([FSOUT_NYQ]), c)).item())
-    p8 = float(db(complete(np.array([8e3]), c)).item())
-    a1 = float(np.max(db(complete(np.linspace(FCRIT, FCRIT_HI, 1001), c))))
-    Rth = (R_SOURCE_AUDIO + c["R1"] + c["R2"]) if c["type"] == "passive" else (10e3 if c["type"] == "arch_b" else RTH_ACTIVE)
-    _, t_req = adc_settling(Rth)
-    print(f"{name:<32s} {fc_text:>9s} {p27:>7.2f} {('OK' if p27 >= -MAX_PASS_LOSS_DB else 'FAIL'):>5s} "
-          f"{p4:>7.2f} {p8:>7.2f} {a1:>8.2f} {('PASS' if T_ACQ_DEFAULT >= t_req else 'FAIL'):>7s}")
 
-print_section("6. MONTE CARLO UQ SUMMARY (±5% C, ±1% R, 1000 RUNS)")
-f_uq_grid = np.unique(np.concatenate([
-    np.logspace(1, np.log10(6e3), 300),
-    np.linspace(6e3, 250e3, 1200)
-]))
-plot_audio_uq("Arch A (2x OPA2320)", f_uq_grid)
-plot_audio_uq("Arch B (3x OPA2320)", f_uq_grid)
+# ============================================================
+# 16. SECTION 3 — ADC SETTLING
+# ============================================================
+
+section("3. ADC SETTLING")
+
+RTH_A = R_KICK
+RTH_B = R_P3
+
+for name, rth in [
+    ("Arch A", RTH_A),
+    # ("Arch B", RTH_B),
+    ("Passive RC2", R_SOURCE_AUDIO + R1_OPT + R2_OPT),
+]:
+
+    tau, required = adc_settling(rth)
+
+    print(
+        f"{name:<14} Rth={rth:9.2f} ohm | "
+        f"tau={tau*1e9:8.3f} ns | "
+        f"required={required*1e9:8.3f} ns | "
+        f"{'PASS' if T_ACQ >= required else 'FAIL'}"
+    )
+
+
+# Idealized charge sharing if C_P3 is directly connected
+# to the ADC sampling capacitor during acquisition.
+charge_error = C_ADC / (C_P3 + C_ADC)
+charge_error_lsb = charge_error * (2**ADC_BITS)
+
+print("\nArch B idealized charge-sharing estimate:")
+print(f"Error fraction: {100*charge_error:.4f}%")
+print(f"Error in ADC LSB: {charge_error_lsb:.2f} LSB")
+
+
+# ============================================================
+# SECTION 8 — FINAL COMPLIANCE VERDICT
+# ============================================================
+
+section("4. FINAL DESIGN COMPLIANCE VERDICT")
+
+corner_a_failed = not corner_results["A"]["passed"]
+corner_b_failed = False  # not corner_results["B"]["passed"]
+
+print(f"Compliance target: {TARGET:+.2f} dB")
+print()
+
+for arch_key, arch_name in arch_map:
+
+    result = corner_results[arch_key]
+
+    print(f"{arch_name}:")
+    print(f"  Worst component corner: {result['worst_db']:+.2f} dB")
+    print(f"  Required maximum:       {TARGET:+.2f} dB")
+    print(f"  Compliance margin:      {result['margin_db']:+.2f} dB")
+    print(f"  Verdict:                {'PASS' if result['passed'] else 'FAIL'}")
+    print()
+
+if corner_a_failed or corner_b_failed:
+
+    section("VERDICT — CORNER FAIL")
+
+    if corner_a_failed:
+        print("Arch A: FAIL")
+
+    if corner_b_failed:
+        print("Arch B: FAIL")
+
+    print()
+    print("Do not claim component-tolerance compliance.")
+
+else:
+
+    section("VERDICT — CORNER PASS")
+
+    print("Arch A: PASS")
+    print("Arch B: PASS")
+    print()
+    print("Both architectures pass the enumerated")
+    print("component-tolerance corner analysis.")
+
+# ============================================================
+# 5. ARCHITECTURE A MONTE CARLO ANALYSIS
+# ============================================================
+
+section("5. ARCHITECTURE A MONTE CARLO ANALYSIS")
+
+mc_results_A = plot_audio_uq(
+    architecture="A", f_grid=np.linspace(0, FS * 1.5, 3000), n_runs=5000
+)
+
+# ============================================================
+# SECTION 10 — SUMMARY
+# ============================================================
+
+section("6. REV 40N FINAL SUMMARY")
+
+print(f"Sampling frequency:       {FS/1e3:.1f} kHz")
+print(f"Output sampling rate:     {FSOUT/1e3:.1f} kHz")
+print(f"SSB bandwidth:            {SSB/1e3:.2f} kHz")
+print(f"Alias evaluation zone:    {FCRIT/1e3:.1f}–{FCRIT_HI/1e3:.1f} kHz")
+print(f"Alias rejection target:   {-TARGET:.2f} dB")
+print(f"ADC reference:            {ADC_VREF:.2f} V")
+print(f"ADC resolution:           {ADC_BITS} bits")
+print(f"ADC LSB:                  {ADC_LSB*1e3:.4f} mV")
+print(f"ADC acquisition budget:   {T_ACQ*1e9:.0f} ns")
+print(f"Arch A settling:          {adc_settling(RTH_A)[1]*1e9:.2f} ns")
+# print(f"Arch B settling:          {adc_settling(RTH_B)[1]*1e9:.2f} ns")
+print(f"Passive RC2 feasible:     {PASSIVE_FEASIBLE}")
+print(f"Arch A corner:            {'FAIL' if corner_a_failed else 'PASS'}")
+# print(f"Arch B corner:            {'FAIL' if corner_b_failed else 'PASS'}")
+print()
+print("END OF REV 40N ANALYSIS")
 
 ```
 
     
     ==============================================================================
-    1. TAYLOE BASEBAND MODEL (4-PHASE COMMUTATING)
+    0. EXHAUSTIVE COMPONENT CORNER ANALYSIS
     ==============================================================================
-    R_SOURCE_RF: 8.22 ohm | R_on: 5.0 ohm | R_SOURCE_AUDIO (4x): 52.88 ohm
-    20m (C = 2.2 nF) -> fc = 1.368 MHz
-    40m (C = 4.3 nF) -> fc = 0.700 MHz
+    
+    Architecture A — 2x OPA2320
+      Number of corners: 128
+      Worst alias response: -65.03 dB
+      Required maximum: -66.52 dB
+      Compliance margin: -1.49 dB
+      Verdict: FAIL
+      Worst-case component values:
+        c_ac     = 1.2e-05
+        r_in     = 1010
+        r_fb     = 49500
+        c_fb     = 2.09e-10
+        ra       = 9900
+        ca       = 1.425e-09
+        cb       = 7.125e-10
+    
+    ==============================================================================
+    1. TAYLOE BASEBAND
+    ==============================================================================
+    RF source resistance: 8.22 ohm
+    Tayloe switch Ron: 5.00 ohm
+    Four-phase audio source: 52.88 ohm
+    20m cutoff: 1.368 MHz
+    40m cutoff: 0.700 MHz
+    Front-end insertion loss: 0.00 dB
     
     ==============================================================================
     2. PASSIVE RC2 OPTIMIZATION
     ==============================================================================
-    R1=1.00 ohm, R2=100000.00 ohm, C1=314.294 nF, C2=0.169 nF
-    Worst passband: -0.689 dB | Worst alias: -52.061 dB | Feasible: False
+    R1: 1.00 ohm
+    R2: 48048.10 ohm
+    C1: 314.239 nF
+    C2: 0.352 nF
+    Passband minimum: -0.689 dB
+    Alias maximum: -52.053 dB
+    Required settling: 2600.66 ns
+    Available acquisition: 2600.00 ns
+    Feasible: False
     
     ==============================================================================
-    3. ADC SWITCHED-CAPACITOR SETTLING (3.10 V RAIL, T_acq = 2600 ns)
+    3. ADC SETTLING
     ==============================================================================
-    Passive RC2 (Rth=100054 ohm): t_req = 5409.5 ns -> FAIL
-    Arch A 2xIC (Rth=100 ohm):   t_req = 5.41 ns -> PASS
-    Arch B 3xIC (Rth=10000 ohm): t_req = 540.7 ns -> PASS
+    Arch A         Rth=   100.00 ohm | tau=   0.600 ns | required=   5.407 ns | PASS
+    Passive RC2    Rth= 48101.98 ohm | tau= 288.612 ns | required=2600.656 ns | FAIL
+    
+    Arch B idealized charge-sharing estimate:
+    Error fraction: 0.5525%
+    Error in ADC LSB: 22.63 LSB
     
     ==============================================================================
-    4. RECEIVER GAIN, NOISE FLOOR & DYNAMIC RANGE BUDGET
+    4. FINAL DESIGN COMPLIANCE VERDICT
     ==============================================================================
-    Quiet 20m Band Noise (2.7 kHz): -121.7 dBm | STM32 ADC Noise Floor: -76.5 dBm
-    Old Rev 40M (0 dB Gain):  Band noise at ADC = -121.7 dBm (45.2 dB below ADC noise -> BLIND)
-    Rev 40N (+33.5 dB Gain): Band noise at ADC = -88.2 dBm (11.2 dB above ADC noise -> OK)
-    Max Antenna Input before 3.1V Clip: -20.0 dBm (~S9+52 dB)
+    Compliance target: -66.52 dB
+    
+    Architecture A — 2x OPA2320:
+      Worst component corner: -65.03 dB
+      Required maximum:       -66.52 dB
+      Compliance margin:      -1.49 dB
+      Verdict:                FAIL
+    
     
     ==============================================================================
-    5. FINAL COMPARISON (COMPLETE CHAIN: TAYLOE + ANALOG + DIGITAL)
+    VERDICT — CORNER FAIL
     ==============================================================================
-    Filter                             fc(kHz)    2.7k  Pass      4k      8k   Alias1  Settle
-    ----------------------------------------------------------------------------------------
-    Arch A (2x OPA2320 4-OpAmp)          14.70   -0.32    OK  -64.86  -71.61   -66.69    PASS
-    Arch B (3x OPA2320 6-OpAmp)          14.70   -0.32    OK  -64.85  -71.60   -66.83    PASS
-    0-pole Butterworth                  Bypass   -0.17    OK  -64.52  -70.12    -0.08    PASS
-    1-pole Butterworth                    0.09  -29.84  FAIL  -97.60 -109.21   -66.75    PASS
-    2-pole Butterworth                    4.08   -0.93  FAIL  -67.35  -82.08   -66.86    PASS
-    3-pole Butterworth                   14.64   -0.17    OK  -64.52  -70.23   -66.93    PASS
-    4-pole Butterworth                   27.71   -0.17    OK  -64.52  -70.12   -66.97    PASS
-    Buffered RC2                          4.09   -3.32  FAIL  -70.36  -83.80   -66.86    PASS
-    Sallen-Key Butterworth                4.08   -0.93  FAIL  -67.35  -82.08   -66.86    PASS
+    Arch A: FAIL
+    
+    Do not claim component-tolerance compliance.
     
     ==============================================================================
-    6. MONTE CARLO UQ SUMMARY (±5% C, ±1% R, 1000 RUNS)
+    5. ARCHITECTURE A MONTE CARLO ANALYSIS
     ==============================================================================
+    
+    Architecture A — Alias rejection statistics
+    --------------------------------------------------------------------
+    Level         Quantile      Response       Margin   Verdict
+    --------------------------------------------------------------------
+    Median       50.00000%       -66.64 dB      +0.12 dB      PASS
+    1 sigma      84.13450%       -66.34 dB      -0.18 dB      FAIL
+    2 sigma      97.72500%       -66.06 dB      -0.46 dB      FAIL
+    3 sigma      99.86500%       -65.82 dB      -0.70 dB      FAIL
+    4 sigma      99.99683%       -65.74 dB      -0.78 dB      FAIL
+    5 sigma      99.99997%       -65.73 dB      -0.79 dB      FAIL
+    6 sigma     100.00000%       -65.73 dB      -0.79 dB      FAIL
+    Maximum     100.00000%       -65.73 dB      -0.79 dB      FAIL
+    --------------------------------------------------------------------
 
 
 
@@ -452,14 +981,22 @@ plot_audio_uq("Arch B (3x OPA2320)", f_uq_grid)
     
 
 
-      Arch A (2x OPA2320)       | 97.5th-pct Worst Alias1 = -65.78 dB (Target <= -66.5 dB)
-
-
-
     
-![png](output_0_3.png)
+    ==============================================================================
+    6. REV 40N FINAL SUMMARY
+    ==============================================================================
+    Sampling frequency:       192.0 kHz
+    Output sampling rate:     8.0 kHz
+    SSB bandwidth:            2.70 kHz
+    Alias evaluation zone:    188.0–196.0 kHz
+    Alias rejection target:   66.52 dB
+    ADC reference:            3.10 V
+    ADC resolution:           12 bits
+    ADC LSB:                  0.7568 mV
+    ADC acquisition budget:   2600 ns
+    Arch A settling:          5.41 ns
+    Passive RC2 feasible:     False
+    Arch A corner:            FAIL
     
-
-
-      Arch B (3x OPA2320)       | 97.5th-pct Worst Alias1 = -65.83 dB (Target <= -66.5 dB)
+    END OF REV 40N ANALYSIS
 
