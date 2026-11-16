@@ -1,5 +1,3 @@
-### `README.md`
-````markdown
 # QRP Class-E HF Transceiver
 
 A small HF transceiver design for the **20 m** (`14.10 MHz`) and **40 m** (`7.05 MHz`) amateur bands, built around a **4.85 V / 1.65 W** Class-E power amplifier using the **EPC2037** enhancement-mode GaN FET.
