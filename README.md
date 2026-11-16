@@ -1,6 +1,6 @@
 # QRP Class-E HF Transceiver
 
-A small HF transceiver design for the **20 m** (`14.10 MHz`) and **40 m** (`7.05 MHz`) amateur bands, built around a **4.85 V / 1.65 W** Class-E power amplifier using the **EPC2037** enhancement-mode GaN FET.
+A small HF transceiver design for the **20 m** (`14.10 MHz`) and `40 m` (`7.05 MHz`) amateur bands, built around a **4.85 V / 1.65 W** Class-E power amplifier using the **EPC2037** enhancement-mode GaN FET.
 
 ## Design Notebooks
 
@@ -10,9 +10,9 @@ Currently this is a design stage, currently at validation, the calculations are 
 
 | Design Area | Directory | Notebook | Rendered Output |
 | :--- | :--- | :--- | :--- |
-| TX power stage | [`Notebooks/GaNUnified/`](Notebooks/GaNUnified/) | `GaNUnified.ipynb` | [`GaNUnified.md`](Notebooks/GaNUnified/GaNUnified.md) |
-| TX/RX harmonic filter | [`Notebooks/LPFOpt/`](Notebooks/LPFOpt/) | `LPFOpt.ipynb` | [`LPFOpt.md`](Notebooks/LPFOpt/LPFOpt.md) |
-| RX baseband | [`Notebooks/AudioOpt/`](Notebooks/AudioOpt/) | `AudioOpt.ipynb` | [`AudioOpt.md`](Notebooks/AudioOpt/AudioOpt.md) |
+| TX power stage | [`Notebooks/GaNUnified/`](Notebooks/GaNUnified/) | [`GaNUnified.ipynb`](Notebooks/GaNUnified/GaNUnified.ipynb) | [`GaNUnified.md`](Notebooks/GaNUnified/GaNUnified.md) |
+| TX/RX harmonic filter | [`Notebooks/LPFOpt/`](Notebooks/LPFOpt/) | [`LPFOpt.ipynb`](Notebooks/LPFOpt/LPFOpt.ipynb) | [`LPFOpt.md`](Notebooks/LPFOpt/LPFOpt.md) |
+| RX baseband | [`Notebooks/AudioOpt/`](Notebooks/AudioOpt/) | [`AudioOpt.ipynb`](Notebooks/AudioOpt/AudioOpt.ipynb) | [`AudioOpt.md`](Notebooks/AudioOpt/AudioOpt.md) |
 
 Deprecated prototypes live in [`Notebooks/Attic/`](Notebooks/Attic/) and are listed there.
 
