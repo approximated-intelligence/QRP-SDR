@@ -936,7 +936,7 @@ DESIGNS = [
         name="Original design", val=VAL0, cls=CLS0, lbl=LBL0, color="steelblue", ok=ok0
     ),
     dict(
-        name="Original values, C0G1",
+        name="Original, C0G1",
         val=VAL0,
         cls=CLS0_C0G1,
         lbl=LBL0,
@@ -947,8 +947,8 @@ DESIGNS = [
 VARIANTS = [  # name, max_par, color, allowed cap classes (None = all)
     ("Opt. single (C0G)", 1, "seagreen", {"C0G": 0.0}),
     ("Opt. parallel (C0G)", 2, "olive", {"C0G": 0.0}),
-    ("Opt. single (any grade)", 1, "darkorange", None),
-    ("Opt. parallel (any grade)", 2, "crimson", None),
+    ("Opt. single (any)", 1, "darkorange", None),
+    ("Opt. parallel (any)", 2, "crimson", None),
 ]
 
 section("5. PASSIVE RC2 - SAME RULES AS ARCH A")
@@ -971,20 +971,22 @@ for k, (name, max_par, color, ccls) in enumerate(VARIANTS, start=1):
     plot_uq(v, c, name, ref_val=VAL0)
     DESIGNS.append(dict(name=name, val=v, cls=c, lbl=l, color=color, ok=ok))
 
-section("7. ANALOG RESPONSE COMPARISON, 0-24 kHz")
+section("7. R_A SWEEPS (feasible configurations only)")
+for d in DESIGNS[2:]:
+    ra_sweep_plot(d)
+
+section("8. ANALOG RESPONSE COMPARISON, 0-24 kHz")
 plot_analog_compare(
     [(d["name"], d["val"], d["color"]) for d in DESIGNS],
     [(d["name"], d["val"], d["color"], d["ok"]) for d in RC2_DESIGNS],
 )
 
-section("8. R_A SWEEPS (feasible configurations only)")
-for d in DESIGNS[2:]:
-    ra_sweep_plot(d)
-
 # ------------------------------------------------------------
 section("9. FINAL COMPARISON - ARCH A DESIGNS")
-W = 26
+W = 20
 hdr = f"{'':<36}" + "".join(f"{d['name']:>{W}}" for d in DESIGNS)
+W2 = 20
+hdr2 = f"{'':<36}" + "".join(f"{d['name']:>{W2}}" for d in RC2_DESIGNS)
 print(f"alias zone {FCRIT/1e3:.1f}-{FCRIT_HI/1e3:.1f} kHz | target {TARGET:+.2f} dB\n")
 print("Components (value [class]); a+b = two caps in parallel")
 print(hdr)
@@ -1049,8 +1051,6 @@ row(
 )
 
 section("9b. FINAL COMPARISON - PASSIVE RC2 (same chain, corners, pools, settling)")
-W2 = 26
-hdr2 = f"{'':<36}" + "".join(f"{d['name']:>{W2}}" for d in RC2_DESIGNS)
 print(hdr2)
 print("-" * len(hdr2))
 for n in RC_NAMES:
@@ -1084,10 +1084,6 @@ row2("verdict", ["FEASIBLE" if d["ok"] else "INFEASIBLE" for d in RC2_DESIGNS])
 
 for d in DESIGNS[2:]:
     print_bom(f"{d['name']} - final component table", d["val"], d["cls"], d["lbl"])
-
-# ============================================================
-# 9. CONSOLIDATED 2x2 EXPERIMENTAL RESULTS
-# ============================================================
 
 # Select the four optimized designs (exclude original references)
 EXP = DESIGNS[2:]
@@ -1248,7 +1244,7 @@ print(
     ==============================================================================
 
 
-    /tmp/ipykernel_17046/395899888.py:203: RuntimeWarning: overflow encountered in exp
+    /tmp/ipykernel_18543/2480955634.py:203: RuntimeWarning: overflow encountered in exp
       fc = np.exp(l0 + (-3.0103 - h0) / (h1 - h0 + 1e-30) * (l1 - l0))
 
 
@@ -1391,13 +1387,13 @@ print(
 
     
     ==============================================================================
-    6.3 MILP OPTIMIZATION - OPT. SINGLE (ANY GRADE)
+    6.3 MILP OPTIMIZATION - OPT. SINGLE (ANY)
     ==============================================================================
     start: viol=1.486  alias=-65.03 dB  pass=0.370 dB  fc_min=10.11 kHz
     it  1: delta=0.150 margin=0.00 | fc_min= 11.55 kHz alias=-66.64 pass=0.260 viol=0.000 | ACCEPT
     it  2: MILP returned current design -> converged
     
-    Opt. single (any grade) - component values
+    Opt. single (any) - component values
       ----------------------------------------------------------------------------------------------------
       Ref   Role                                  Value Build          Class     Tol       Min       Max      Exact [SI]
       ----------------------------------------------------------------------------------------------------
@@ -1410,7 +1406,7 @@ print(
       cb    Sallen-Key Cb (cap to ground)          680p 680p           C0G1       1%    673.2p    686.8p         6.8e-10
       ----------------------------------------------------------------------------------------------------
     
-    Opt. single (any grade) - derived quantities
+    Opt. single (any) - derived quantities
       signal gain (r_fb / (r_in + R_src)) : 47.49 V/V = 33.53 dB (R_src = 52.88 ohm)
       AC-coupling HPF corner               : 15.12 Hz
       diff-amp feedback pole (pole 1)      : 15.915 kHz
@@ -1421,12 +1417,12 @@ print(
       nominal alias response               : -67.16 dB (limit -66.52)
       nominal passband deviation           : 0.248 dB (limit 0.5)
     
-    Opt. single (any grade) - tolerance analysis
+    Opt. single (any) - tolerance analysis
       corners: 128 | worst alias -66.64 dB (limit -66.52, margin +0.12) | worst passband dev 0.260 dB (limit 0.5) | fc_min 11.55 kHz | Q 0.759..0.775
       corner verdict: PASS
       MC alias: median -67.16, p99.9 -66.89, max -66.82 dB | fc median 11.87, p1 11.74 kHz
     
-    Opt. single (any grade) - alias rejection statistics
+    Opt. single (any) - alias rejection statistics
     --------------------------------------------------------------------
     Level         Quantile      Response       Margin   Verdict
     Median       50.00000%       -67.16 dB      +0.64 dB      PASS
@@ -1446,7 +1442,7 @@ print(
 
     
     ==============================================================================
-    6.4 MILP OPTIMIZATION - OPT. PARALLEL (ANY GRADE)
+    6.4 MILP OPTIMIZATION - OPT. PARALLEL (ANY)
     ==============================================================================
     start: viol=1.486  alias=-65.03 dB  pass=0.370 dB  fc_min=10.11 kHz
     it  1: delta=0.150 margin=0.00 | fc_min= 12.29 kHz alias=-66.58 pass=0.212 viol=0.000 | ACCEPT
@@ -1455,7 +1451,7 @@ print(
     it  4: delta=0.150 margin=0.00 | fc_min= 12.51 kHz alias=-66.52 pass=0.250 viol=0.000 | reject
     it  5: MILP returned current design -> converged
     
-    Opt. parallel (any grade) - component values
+    Opt. parallel (any) - component values
       ----------------------------------------------------------------------------------------------------
       Ref   Role                                  Value Build          Class     Tol       Min       Max      Exact [SI]
       ----------------------------------------------------------------------------------------------------
@@ -1468,7 +1464,7 @@ print(
       cb    Sallen-Key Cb (cap to ground)          572p 62p+510p       C0G1       1%    566.3p    577.7p        5.72e-10
       ----------------------------------------------------------------------------------------------------
     
-    Opt. parallel (any grade) - derived quantities
+    Opt. parallel (any) - derived quantities
       signal gain (r_fb / (r_in + R_src)) : 47.49 V/V = 33.53 dB (R_src = 52.88 ohm)
       AC-coupling HPF corner               : 15.12 Hz
       diff-amp feedback pole (pole 1)      : 16.579 kHz
@@ -1479,12 +1475,12 @@ print(
       nominal alias response               : -67.07 dB (limit -66.52)
       nominal passband deviation           : 0.188 dB (limit 0.5)
     
-    Opt. parallel (any grade) - tolerance analysis
+    Opt. parallel (any) - tolerance analysis
       corners: 128 | worst alias -66.54 dB (limit -66.52, margin +0.02) | worst passband dev 0.199 dB (limit 0.5) | fc_min 12.61 kHz | Q 0.833..0.850
       corner verdict: PASS
       MC alias: median -67.06, p99.9 -66.80, max -66.73 dB | fc median 12.92, p1 12.79 kHz
     
-    Opt. parallel (any grade) - alias rejection statistics
+    Opt. parallel (any) - alias rejection statistics
     --------------------------------------------------------------------
     Level         Quantile      Response       Margin   Verdict
     Median       50.00000%       -67.06 dB      +0.54 dB      PASS
@@ -1504,8 +1500,9 @@ print(
 
     
     ==============================================================================
-    7. ANALOG RESPONSE COMPARISON, 0-24 kHz
+    7. R_A SWEEPS (feasible configurations only)
     ==============================================================================
+    Opt. single (C0G): 6 feasible / 31 E96 values of ra in 6.8-14.0 kOhm (25 rejected)
 
 
 
@@ -1514,11 +1511,7 @@ print(
     
 
 
-    
-    ==============================================================================
-    8. R_A SWEEPS (feasible configurations only)
-    ==============================================================================
-    Opt. single (C0G): 6 feasible / 31 E96 values of ra in 6.8-14.0 kOhm (25 rejected)
+    Opt. parallel (C0G): 7 feasible / 31 E96 values of ra in 6.8-14.0 kOhm (24 rejected)
 
 
 
@@ -1527,7 +1520,7 @@ print(
     
 
 
-    Opt. parallel (C0G): 7 feasible / 31 E96 values of ra in 6.8-14.0 kOhm (24 rejected)
+    Opt. single (any): 11 feasible / 31 E96 values of ra in 6.8-14.0 kOhm (20 rejected)
 
 
 
@@ -1536,7 +1529,7 @@ print(
     
 
 
-    Opt. single (any grade): 11 feasible / 31 E96 values of ra in 6.8-14.0 kOhm (20 rejected)
+    Opt. parallel (any): 7 feasible / 31 E96 values of ra in 6.8-14.0 kOhm (24 rejected)
 
 
 
@@ -1545,7 +1538,10 @@ print(
     
 
 
-    Opt. parallel (any grade): 7 feasible / 31 E96 values of ra in 6.8-14.0 kOhm (24 rejected)
+    
+    ==============================================================================
+    8. ANALOG RESPONSE COMPARISON, 0-24 kHz
+    ==============================================================================
 
 
 
@@ -1561,52 +1557,52 @@ print(
     alias zone 188.0-196.0 kHz | target -66.52 dB
     
     Components (value [class]); a+b = two caps in parallel
-                                                   Original design     Original values, C0G1         Opt. single (C0G)       Opt. parallel (C0G)   Opt. single (any grade) Opt. parallel (any grade)
-    ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-    c_ac AC-coupling capacitor                           10u [X5R]                 10u [X5R]                 10u [X5R]                 10u [X5R]                 10u [X5R]                 10u [X5R]
-    r_in Diff-amp input resistor                        1k [R1pct]                1k [R1pct]                1k [R1pct]                1k [R1pct]                1k [R1pct]                1k [R1pct]
-    r_fb Diff-amp feedback resistor                    50k [R1pct]               50k [R1pct]               50k [R1pct]               50k [R1pct]               50k [R1pct]               50k [R1pct]
-    c_fb Diff-amp feedback cap (pole 1)                 220p [C0G]               220p [C0G1]                200p [C0G]            75p+120p [C0G]               200p [C0G1]           82p+110p [C0G1]
-    ra Sallen-Key R (both resistors)                   10k [R1pct]               10k [R1pct]             12.4k [R1pct]             12.1k [R1pct]               11k [R1pct]             12.1k [R1pct]
-    ca Sallen-Key Ca (feedback cap)                     1.5n [C0G]               1.5n [C0G1]                1.6n [C0G]            47p+1.6n [C0G]               1.6n [C0G1]            620p+1n [C0G1]
-    cb Sallen-Key Cb (cap to ground)                    750p [C0G]               750p [C0G1]                620p [C0G]           300p+330p [C0G]               680p [C0G1]           62p+510p [C0G1]
+                                             Original design      Original, C0G1   Opt. single (C0G) Opt. parallel (C0G)   Opt. single (any) Opt. parallel (any)
+    ------------------------------------------------------------------------------------------------------------------------------------------------------------
+    c_ac AC-coupling capacitor                     10u [X5R]           10u [X5R]           10u [X5R]           10u [X5R]           10u [X5R]           10u [X5R]
+    r_in Diff-amp input resistor                  1k [R1pct]          1k [R1pct]          1k [R1pct]          1k [R1pct]          1k [R1pct]          1k [R1pct]
+    r_fb Diff-amp feedback resistor              50k [R1pct]         50k [R1pct]         50k [R1pct]         50k [R1pct]         50k [R1pct]         50k [R1pct]
+    c_fb Diff-amp feedback cap (pole 1)           220p [C0G]         220p [C0G1]          200p [C0G]      75p+120p [C0G]         200p [C0G1]     82p+110p [C0G1]
+    ra Sallen-Key R (both resistors)             10k [R1pct]         10k [R1pct]       12.4k [R1pct]       12.1k [R1pct]         11k [R1pct]       12.1k [R1pct]
+    ca Sallen-Key Ca (feedback cap)               1.5n [C0G]         1.5n [C0G1]          1.6n [C0G]      47p+1.6n [C0G]         1.6n [C0G1]      620p+1n [C0G1]
+    cb Sallen-Key Cb (cap to ground)              750p [C0G]         750p [C0G1]          620p [C0G]     300p+330p [C0G]         680p [C0G1]     62p+510p [C0G1]
     
     Performance
-                                                   Original design     Original values, C0G1         Opt. single (C0G)       Opt. parallel (C0G)   Opt. single (any grade) Opt. parallel (any grade)
-    ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-    nominal fc [kHz]                                        11.040                    11.040                    11.778                    11.953                    11.861                    12.915
-    worst-corner fc [kHz]                                   10.113                    10.724                    10.936                    11.113                    11.549                    12.605
-    worst-corner fc vs original                              +0.0%                     +6.0%                     +8.1%                     +9.9%                    +14.2%                    +24.6%
-    nominal alias [dB]                                      -66.63                    -66.63                    -68.44                    -68.19                    -67.16                    -67.07
-    worst-corner alias [dB]                                 -65.03                    -66.11                    -66.84                    -66.59                    -66.64                    -66.54
-    alias margin vs -66.52 dB                                -1.49                     -0.41                     +0.33                     +0.07                     +0.12                     +0.02
-    worst-corner passband dev [dB]                           0.370                     0.334                     0.261                     0.250                     0.260                     0.199
-    Q over corners                                    0.673..0.743              0.700..0.714              0.764..0.844              0.769..0.850              0.759..0.775              0.833..0.850
-    ADC residual [LSB] (limit 0.5)                        1.46e-10                  1.46e-10                  1.46e-10                  1.46e-10                  1.46e-10                  1.46e-10
-    signal gain [dB]                                          33.5                      33.5                      33.5                      33.5                      33.5                      33.5
-    # parallel-built caps                                        0                         0                         0                         3                         0                         3
-    # C0G1 (1%) caps                                             0                         3                         0                         0                         3                         3
-    relative cap cost (model units)                           0.00                      1.50                      0.00                      0.12                      1.50                      1.62
-    verdict (corners + settling)                              FAIL                      FAIL                      PASS                      PASS                      PASS                      PASS
+                                             Original design      Original, C0G1   Opt. single (C0G) Opt. parallel (C0G)   Opt. single (any) Opt. parallel (any)
+    ------------------------------------------------------------------------------------------------------------------------------------------------------------
+    nominal fc [kHz]                                  11.040              11.040              11.778              11.953              11.861              12.915
+    worst-corner fc [kHz]                             10.113              10.724              10.936              11.113              11.549              12.605
+    worst-corner fc vs original                        +0.0%               +6.0%               +8.1%               +9.9%              +14.2%              +24.6%
+    nominal alias [dB]                                -66.63              -66.63              -68.44              -68.19              -67.16              -67.07
+    worst-corner alias [dB]                           -65.03              -66.11              -66.84              -66.59              -66.64              -66.54
+    alias margin vs -66.52 dB                          -1.49               -0.41               +0.33               +0.07               +0.12               +0.02
+    worst-corner passband dev [dB]                     0.370               0.334               0.261               0.250               0.260               0.199
+    Q over corners                              0.673..0.743        0.700..0.714        0.764..0.844        0.769..0.850        0.759..0.775        0.833..0.850
+    ADC residual [LSB] (limit 0.5)                  1.46e-10            1.46e-10            1.46e-10            1.46e-10            1.46e-10            1.46e-10
+    signal gain [dB]                                    33.5                33.5                33.5                33.5                33.5                33.5
+    # parallel-built caps                                  0                   0                   0                   3                   0                   3
+    # C0G1 (1%) caps                                       0                   3                   0                   0                   3                   3
+    relative cap cost (model units)                     0.00                1.50                0.00                0.12                1.50                1.62
+    verdict (corners + settling)                        FAIL                FAIL                PASS                PASS                PASS                PASS
     
     ==============================================================================
     9b. FINAL COMPARISON - PASSIVE RC2 (same chain, corners, pools, settling)
     ==============================================================================
-                                                    RC2 (C0G caps)           RC2 (C0G1 caps)
-    ----------------------------------------------------------------------------------------
-    R1                                                 332 [R1pct]               316 [R1pct]
-    R2                                               3.57k [R1pct]             3.16k [R1pct]
-    C1                                                  100n [C0G]               100n [C0G1]
-    C2                                                   12n [C0G]                13n [C0G1]
-    worst-corner alias [dB]                                 -66.53                    -66.51
-    alias margin vs -66.52 dB                                +0.01                     -0.01
-    worst-corner passband dev [dB]                           4.328                     3.874
-    worst-corner fc [kHz]                                    2.201                     2.371
-    ADC residual [LSB] (limit 0.5)                            2.02                      1.79
-    min C1/C2 (need >= 5)                                      7.5                       7.5
-    signal gain [dB]                                           0.0                       0.0
-    relative cap cost (model units)                           0.00                      1.00
-    verdict                                             INFEASIBLE                INFEASIBLE
+                                              RC2 (C0G caps)     RC2 (C0G1 caps)
+    ----------------------------------------------------------------------------
+    R1                                           332 [R1pct]         316 [R1pct]
+    R2                                         3.57k [R1pct]       3.16k [R1pct]
+    C1                                            100n [C0G]         100n [C0G1]
+    C2                                             12n [C0G]          13n [C0G1]
+    worst-corner alias [dB]                           -66.53              -66.51
+    alias margin vs -66.52 dB                          +0.01               -0.01
+    worst-corner passband dev [dB]                     4.328               3.874
+    worst-corner fc [kHz]                              2.201               2.371
+    ADC residual [LSB] (limit 0.5)                      2.02                1.79
+    min C1/C2 (need >= 5)                                7.5                 7.5
+    signal gain [dB]                                     0.0                 0.0
+    relative cap cost (model units)                     0.00                1.00
+    verdict                                       INFEASIBLE          INFEASIBLE
     
     Opt. single (C0G) - final component table
       ----------------------------------------------------------------------------------------------------
@@ -1634,7 +1630,7 @@ print(
       cb    Sallen-Key Cb (cap to ground)          630p 300p+330p      C0G        5%    598.5p    661.5p         6.3e-10
       ----------------------------------------------------------------------------------------------------
     
-    Opt. single (any grade) - final component table
+    Opt. single (any) - final component table
       ----------------------------------------------------------------------------------------------------
       Ref   Role                                  Value Build          Class     Tol       Min       Max      Exact [SI]
       ----------------------------------------------------------------------------------------------------
@@ -1647,7 +1643,7 @@ print(
       cb    Sallen-Key Cb (cap to ground)          680p 680p           C0G1       1%    673.2p    686.8p         6.8e-10
       ----------------------------------------------------------------------------------------------------
     
-    Opt. parallel (any grade) - final component table
+    Opt. parallel (any) - final component table
       ----------------------------------------------------------------------------------------------------
       Ref   Role                                  Value Build          Class     Tol       Min       Max      Exact [SI]
       ----------------------------------------------------------------------------------------------------
@@ -1663,7 +1659,7 @@ print(
     ==================================================================================================================================================
     CONSOLIDATED 2x2 OPTIMIZATION EXPERIMENT
     ==================================================================================================================================================
-    Metric                                          Opt. single (C0G)        Opt. parallel (C0G)    Opt. single (any grade)  Opt. parallel (any grade)
+    Metric                                          Opt. single (C0G)        Opt. parallel (C0G)          Opt. single (any)        Opt. parallel (any)
     --------------------------------------------------------------------------------------------------------------------------------------------------
     Nominal fc [kHz]                                           11.778                     11.953                     11.861                     12.915
     Worst-corner fc [kHz]                                      10.936                     11.113                     11.549                     12.605
