@@ -8,7 +8,7 @@ Each subdirectory contains an authoritative notebook (`.ipynb`), its rendered ou
 
 | Directory | Notebook & Export | Documentation | Scope |
 | :--- | :--- | :--- | :--- |
-| [`GaNUnified/`](GaNUnified/) | [`GaNUnified.ipynb`](GaNUnified/GaNUnified.ipynb) · [`GaNUnified.md`](GaNUnified/GaNUnified.md) | [`README.md`](GaNUnified/README.md) | Class-E PA transient ODE solve + constrained SLSQP optimization (`EPC2037`). Digitizes raw `C_oss(V_DS)`, R_DS(on)–T_j, SOA, and Z_th curves from the datasheet figures. |
+| [`GaNOpt/`](GaNOpt/) | [`GaNOpt.ipynb`](GaNOpt/GaNOpt.ipynb) · [`GaNOpt.md`](GaNOpt/GaNOpt.md) | [`README.md`](GaNOpt/README.md) | Class-E PA transient ODE solve + constrained SLSQP optimization (`EPC2037`). Digitizes raw `C_oss(V_DS)`, R_DS(on)–T_j, SOA, and Z_th curves from the datasheet figures. |
 | [`LPFOpt/`](LPFOpt/) | [`LPFOpt.ipynb`](LPFOpt/LPFOpt.ipynb) · [`LPFOpt.md`](LPFOpt/LPFOpt.md) | [`README.md`](LPFOpt/README.md) | TX harmonic filter MINLP synthesis (`LMatch_WB2CBA`, `JA2GQP`, `4Element`) onto E24 C0G capacitors + E12 inductor reels, with vectorized `±5%` Monte Carlo UQ. |
 | [`AudioOpt/`](AudioOpt/) | [`AudioOpt.ipynb`](AudioOpt/AudioOpt.ipynb) · [`AudioOpt.md`](AudioOpt/AudioOpt.md) | [`README.md`](AudioOpt/README.md) | RX baseband gain, anti-aliasing, and DSP decimation UQ: Tayloe detector → OPA2320 gain/AAF → STM32U375 ADC settling → CIC/HB/Polyphase FIR. |
 
@@ -25,10 +25,10 @@ The `Attic/` archive also contains the superseded `.ipynb` files listed in its o
 ```text
 Notebooks/
 ├── README.md
-├── GaNUnified/
+├── GaNOpt/
 │   ├── README.md
-│   ├── GaNUnified.ipynb
-│   └── GaNUnified.md
+│   ├── GaNOpt.ipynb
+│   └── GaNOpt.md
 ├── LPFOpt/
 │   ├── README.md
 │   ├── LPFOpt.ipynb

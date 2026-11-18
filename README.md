@@ -10,7 +10,7 @@ Currently this is a design stage, currently at validation, the calculations are 
 
 | Design Area | Directory | Notebook | Rendered Output |
 | :--- | :--- | :--- | :--- |
-| TX power stage | [`Notebooks/GaNUnified/`](Notebooks/GaNUnified/) | [`GaNUnified.ipynb`](Notebooks/GaNUnified/GaNUnified.ipynb) | [`GaNUnified.md`](Notebooks/GaNUnified/GaNUnified.md) |
+| TX power stage | [`Notebooks/GaNOpt/`](Notebooks/GaNOpt/) | [`GaNOpt.ipynb`](Notebooks/GaNOpt/GaNOpt.ipynb) | [`GaNOpt.md`](Notebooks/GaNOpt/GaNOpt.md) |
 | TX/RX harmonic filter | [`Notebooks/LPFOpt/`](Notebooks/LPFOpt/) | [`LPFOpt.ipynb`](Notebooks/LPFOpt/LPFOpt.ipynb) | [`LPFOpt.md`](Notebooks/LPFOpt/LPFOpt.md) |
 | RX baseband | [`Notebooks/AudioOpt/`](Notebooks/AudioOpt/) | [`AudioOpt.ipynb`](Notebooks/AudioOpt/AudioOpt.ipynb) | [`AudioOpt.md`](Notebooks/AudioOpt/AudioOpt.md) |
 

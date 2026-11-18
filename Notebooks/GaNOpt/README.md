@@ -1,7 +1,7 @@
 # Class-E GaN Power Amplifier Optimization (`EPC2037`)
 
-* **Notebook:** [`GaNUnified.ipynb`](GaNUnified.ipynb)
-* **Rendered Output:** [`GaNUnified.md`](GaNUnified.md)
+* **Notebook:** [`GaNOpt.ipynb`](GaNOpt.ipynb)
+* **Rendered Output:** [`GaNOpt.md`](GaNOpt.md)
 * **Parent Directory:** [`Notebooks/`](../README.md)
 
 Transient ODE simulation and constrained SLSQP optimization of the **4.85 V / 1.65 W nominal Class-E HF Power Amplifier** (`14.0 MHz` / `7.0 MHz`) using the **EPC2037** enhancement-mode GaN FET. The notebook is authoritative for all design values and results; this README only describes scope.
