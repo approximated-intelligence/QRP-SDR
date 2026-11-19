@@ -3894,8 +3894,8 @@ if __name__ == "__main__":
     ======================================================================================
     Analytical Class-E: Ropt=8.2229 Ω | Csh=253.83 pF | L1=107.73 nH | L2=280.44 nH | C2=460.83 pF
     Thermal check (Fig 8): RON_typ @ 75°C = 0.5200 Ω | Integrated Qoss(50V) = 467.72 pC
-      T1 MILP Joint ZVS+ZDS (20m->40m) in 84.4s | 20m BOM: Cext=270pF+trim(18pF), L1=180nH, L2=220nH, C2=470pF, Ropt=7.95Ω
-      T2 MILP Joint ZVS+ZDS (20m->40m) in 207.8s | 20m BOM: Cext=270pF+trim(18pF), L1=120nH, L2=270nH, C2=470pF, Ropt=8.22Ω
+      T1 MILP Joint ZVS+ZDS (20m->40m) in 84.5s | 20m BOM: Cext=270pF+trim(18pF), L1=180nH, L2=220nH, C2=470pF, Ropt=7.95Ω
+      T2 MILP Joint ZVS+ZDS (20m->40m) in 205.9s | 20m BOM: Cext=270pF+trim(18pF), L1=120nH, L2=270nH, C2=470pF, Ropt=8.22Ω
     
     ### CLASS-E PA FULL DIAGNOSTICS TABLE
     
@@ -4805,8 +4805,3 @@ if __name__ == "__main__":
         * Opt. single (any)     : c_fb=200pF [C0G1], ra=11k [R1pct], ca=1.6nF [C0G1], cb=680pF [C0G1]
         * Opt. parallel (any)   : c_fb=82pF+110pF [C0G1], ra=12.1k [R1pct], ca=620pF+1nF [C0G1], cb=62pF+510pF [C0G1]
 
-
-
-```python
-
-```
