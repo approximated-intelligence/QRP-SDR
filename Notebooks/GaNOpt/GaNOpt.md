@@ -531,7 +531,7 @@ plt.tight_layout(); plt.show()
     ================================================================================
     Starting SLSQP... (dots = 10 function evaluations)
     ..
-    T2 finished in 13.5s. Status: Optimization terminated successfully
+    T2 finished in 13.4s. Status: Optimization terminated successfully
     
     ### FULL DIAGNOSTICS TABLE
     
@@ -551,18 +551,18 @@ plt.tight_layout(); plt.show()
 
 
     
-![png](output_0_1.png)
+![png](GaNOpt_files/GaNOpt_0_1.png)
     
 
 
 
     
-![png](output_0_2.png)
+![png](GaNOpt_files/GaNOpt_0_2.png)
     
 
 
 
     
-![png](output_0_3.png)
+![png](GaNOpt_files/GaNOpt_0_3.png)
     
 
