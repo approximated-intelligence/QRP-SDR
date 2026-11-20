@@ -1195,7 +1195,7 @@ print(
 
 
     
-![png](output_0_1.png)
+![png](AudioOpt_files/AudioOpt_0_1.png)
     
 
 
@@ -1234,7 +1234,7 @@ print(
 
 
     
-![png](output_0_3.png)
+![png](AudioOpt_files/AudioOpt_0_3.png)
     
 
 
@@ -1321,7 +1321,7 @@ print(
 
 
     
-![png](output_0_7.png)
+![png](AudioOpt_files/AudioOpt_0_7.png)
     
 
 
@@ -1381,7 +1381,7 @@ print(
 
 
     
-![png](output_0_9.png)
+![png](AudioOpt_files/AudioOpt_0_9.png)
     
 
 
@@ -1436,7 +1436,7 @@ print(
 
 
     
-![png](output_0_11.png)
+![png](AudioOpt_files/AudioOpt_0_11.png)
     
 
 
@@ -1494,7 +1494,7 @@ print(
 
 
     
-![png](output_0_13.png)
+![png](AudioOpt_files/AudioOpt_0_13.png)
     
 
 
@@ -1507,7 +1507,7 @@ print(
 
 
     
-![png](output_0_15.png)
+![png](AudioOpt_files/AudioOpt_0_15.png)
     
 
 
@@ -1516,7 +1516,7 @@ print(
 
 
     
-![png](output_0_17.png)
+![png](AudioOpt_files/AudioOpt_0_17.png)
     
 
 
@@ -1525,7 +1525,7 @@ print(
 
 
     
-![png](output_0_19.png)
+![png](AudioOpt_files/AudioOpt_0_19.png)
     
 
 
@@ -1534,7 +1534,7 @@ print(
 
 
     
-![png](output_0_21.png)
+![png](AudioOpt_files/AudioOpt_0_21.png)
     
 
 
@@ -1546,7 +1546,7 @@ print(
 
 
     
-![png](output_0_23.png)
+![png](AudioOpt_files/AudioOpt_0_23.png)
     
 
 
