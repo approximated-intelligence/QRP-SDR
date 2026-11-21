@@ -555,7 +555,7 @@ for band_name, f0 in [("20m (14.10 MHz)", 14.1e6), ("40m (7.05 MHz)", 7.05e6)]:
 
 
     
-![png](output_0_1.png)
+![png](LPFOpt_files/LPFOpt_0_1.png)
     
 
 
@@ -626,6 +626,6 @@ for band_name, f0 in [("20m (14.10 MHz)", 14.1e6), ("40m (7.05 MHz)", 7.05e6)]:
 
 
     
-![png](output_0_3.png)
+![png](LPFOpt_files/LPFOpt_0_3.png)
     
 

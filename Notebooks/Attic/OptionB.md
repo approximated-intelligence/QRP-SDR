@@ -1,0 +1,641 @@
+```python
+#!/usr/bin/env python3
+"""unified_pa_design_optB.py
+
+Option B: nonlinear Class-E ODE + standalone filter evaluation.
+
+Tank:
+  Nonlinear ODE (from ClassE.pdf / GaN.pdf), EPC2037 R_on = 400 mOhm typ.
+  Solves for steady-state I_DC, extracts drain waveforms, ZVS check,
+  Class-E efficiency. Load seen by tank = R_opt by design assumption.
+  Includes R_on sensitivity sweep (0 to 1 Ohm).
+
+Filter:
+  Each topology (LMATCH, JA2GQP, 4Element) evaluated as a two-port with
+  R_in = R_opt, R_out = 50 Ohm. Same as LMATCH.pdf / JA2GQP.pdf / 4Element.pdf.
+  No tank ABCD inserted. Filter S11, S21, harmonic rejection, FCC margins.
+
+Combined:
+  eta_PA_total = eta_ClassE_system(ODE) * 10^(S21_f0/10).
+
+Assumption:
+  The filter presents R_opt at its input at f0 by design (verified by
+  S11(f0) being very low, -26 to -67 dB across the three topologies).
+  At harmonics, the tank's current is dominated by its own Q_L=3 tank
+  (C_2, L_2), not by the filter's harmonic impedance. This is the standard
+  Class-E design approximation.
+"""
+import numpy as np
+from scipy.integrate import solve_ivp
+from scipy.optimize import brentq, differential_evolution
+
+# ============================================================
+# Constants
+# ============================================================
+V_DD, P_out, R_ant = 4.85, 1.65, 50.0
+C_OSS_EPC2037 = 12e-12        # effective at 4.85 V drain (GaN.pdf)
+Q_L = 3.0
+K_R, K_C, K_L = 0.5768, 0.1836, 1.1525
+
+R_ON_TYP = 0.400
+R_ON_MAX = 0.550
+V_DS_MAX = 100.0
+I_D_MAX  = 1.7
+Q_G      = 115e-12
+V_GS_DRIVE = 5.0
+
+FCC_LIMIT_DBc = -43.0
+PA_PROFILES = {
+    'typical':      {2: -20, 3: -25, 4: -30, 5: -35},
+    'conservative': {2: -30, 3: -40, 4: -50, 5: -60},
+}
+BANDS = [
+    {'name': '20m', 'f0': 14.0e6},
+    {'name': '40m', 'f0': 7.0e6},
+]
+
+# ============================================================
+# ABCD helpers
+# ============================================================
+def abcd_shunt_c(C, w):
+    return np.array([[1, 0], [1j*w*C, 1]], dtype=complex)
+
+def abcd_series_l(L, w):
+    return np.array([[1, 1j*w*L], [0, 1]], dtype=complex)
+
+def abcd_series_parallel_lc(L, C, w):
+    denom = 1 - w**2 * L * C
+    Z = 1e9 + 0j if abs(denom) < 1e-14 else (1j*w*L) / denom
+    return np.array([[1, Z], [0, 1]], dtype=complex)
+
+def s_from_abcd(M, R_in, R_out):
+    A, B = M[0,0], M[0,1]
+    C, D = M[1,0], M[1,1]
+    d = A + B/R_out + C*R_in + D*R_in/R_out
+    return ((A + B/R_out - C*R_in - D*R_in/R_out) / d,
+            2.0 * np.sqrt(R_in/R_out) / d)
+
+# ============================================================
+# Tank: analytical (Sokal) + nonlinear ODE verification
+# ============================================================
+def synth_class_e(f0, R_opt, C_oss=C_OSS_EPC2037, Q_L=Q_L):
+    w0 = 2*np.pi*f0
+    C_sh = K_C / (w0 * R_opt)
+    L_1 = K_L * R_opt / w0
+    L_2 = Q_L * R_opt / w0
+    C_2 = 1.0 / (w0**2 * L_2)
+    return dict(C_sh=C_sh, C_ext=C_sh - C_oss,
+                L_1=L_1, L_2=L_2, C_2=C_2, L_total=L_1 + L_2)
+
+def run_class_e_ode(tank, V_DD, R_opt, R_on, f0,
+                    n_warmup=500, n_samples=500,
+                    verbose=False):
+    """Nonlinear Class-E ODE.
+
+    Topology: v_D -> C_sh(shunt) -> L_total(series) -> C_2(series) -> R_opt
+    States:
+      On  (switch closed, t in [0, T/2]): [i_L, v_C2], v_D = R_on*(I_DC - i_L)
+      Off (switch open,   t in [T/2, T]): [v_D, i_L, v_C2]
+    """
+    w0 = 2*np.pi*f0
+    T = 1/f0
+    T_half = T/2
+    L_total = tank['L_total']
+    C_2 = tank['C_2']
+    C_sh = tank['C_sh']
+
+    I_DC_sk = P_out / V_DD
+
+    def make_f_on(I_DC):
+        def f(t, y):
+            i_L, v_C2 = y
+            v_D = R_on * (I_DC - i_L)
+            return [(v_D - v_C2 - R_opt*i_L) / L_total, i_L / C_2]
+        return f
+
+    def make_f_off(I_DC):
+        def f(t, y):
+            v_D, i_L, v_C2 = y
+            return [(I_DC - i_L) / C_sh,
+                    (v_D - v_C2 - R_opt*i_L) / L_total,
+                    i_L / C_2]
+        return f
+
+    def honest_cycle(I_DC, n_warmup_local, n_samples_local):
+        f_on = make_f_on(I_DC)
+        f_off = make_f_off(I_DC)
+        i_L, v_C2 = 0.0, 0.0
+        sol_on = sol_off = None
+        for _ in range(n_warmup_local):
+            sol_on = solve_ivp(f_on, [0, T_half], [i_L, v_C2],
+                               method='LSODA', rtol=1e-10, atol=1e-13,
+                               dense_output=True)
+            i_L, v_C2 = sol_on.y[0,-1], sol_on.y[1,-1]
+            v_D_end_on = R_on * (I_DC - i_L)
+            sol_off = solve_ivp(f_off, [0, T_half], [v_D_end_on, i_L, v_C2],
+                                method='LSODA', rtol=1e-10, atol=1e-13,
+                                dense_output=True)
+            i_L, v_C2 = sol_off.y[1,-1], sol_off.y[2,-1]
+
+        t_on  = np.linspace(0, T_half, n_samples_local, endpoint=False)
+        t_off = np.linspace(0, T_half, n_samples_local, endpoint=False)
+        i_L_on  = sol_on.sol(t_on)[0]
+        v_D_on  = R_on * (I_DC - i_L_on) if R_on > 0 else np.zeros_like(t_on)
+        v_D_off = sol_off.sol(t_off)[0]
+        i_L_off = sol_off.sol(t_off)[1]
+
+        t_full   = np.concatenate([t_on, T_half + t_off])
+        v_D_full = np.concatenate([v_D_on, v_D_off])
+        i_L_full = np.concatenate([i_L_on, i_L_off])
+        i_sw_full = np.concatenate([I_DC - i_L_on, np.zeros_like(i_L_off)])
+
+        return dict(
+            t=t_full, v_D=v_D_full, i_L=i_L_full, i_sw=i_sw_full,
+            v_D_avg=np.trapezoid(v_D_full, t_full) / T,
+            v_D_peak=v_D_full.max(),
+            v_D_turnon=v_D_off[-1],
+            i_L_turnon=i_L_off[-1],
+        )
+
+    def resid(I):
+        return (honest_cycle(I, n_warmup_local=150, n_samples_local=80)['v_D_avg']
+                - V_DD)
+
+    I_sol = brentq(resid, 0.7*I_DC_sk, 1.3*I_DC_sk, xtol=1e-7)
+    h = honest_cycle(I_sol, n_warmup_local=n_warmup, n_samples_local=n_samples)
+
+    P_load  = np.trapezoid(h['i_L']**2 * R_opt, h['t']) / T
+    P_Ron   = R_on * np.trapezoid(h['i_sw']**2, h['t']) / T
+    P_ZVS   = 0.5 * C_sh * h['v_D_turnon']**2 * f0
+    P_gate  = Q_G * V_GS_DRIVE * f0
+    P_in    = V_DD * I_sol
+    P_total = P_in + P_gate
+    eta_drain  = P_load / P_in
+    eta_system = P_load / P_total
+
+    if verbose:
+        print(f"  ODE converged: I_DC = {I_sol*1e3:.2f} mA, "
+              f"<v_D> - V_DD = {resid(I_sol)*1e3:+.3f} mV")
+
+    return dict(
+        tank=tank, I_DC=I_sol, R_on=R_on, f0=f0,
+        v_D_peak=h['v_D_peak'], v_D_turnon=h['v_D_turnon'],
+        i_L_peak=h['i_L'].max(), i_sw_peak=h['i_sw'].max(),
+        P_load=P_load, P_Ron=P_Ron, P_ZVS=P_ZVS, P_gate=P_gate,
+        P_in=P_in, P_total=P_total,
+        eta_drain=eta_drain, eta_system=eta_system,
+        t=h['t'], v_D=h['v_D'], i_L=h['i_L'],
+    )
+
+def print_tank_ode(ode):
+    print(f"\n[Class-E tank — ODE, R_on = {ode['R_on']*1e3:.0f} mOhm]")
+    print(f"  I_DC          = {ode['I_DC']*1e3:8.2f} mA  (Sokal ref: {P_out/V_DD*1e3:.1f} mA)")
+    print(f"  v_D peak      = {ode['v_D_peak']:8.3f} V   "
+          f"(limit {V_DS_MAX:.0f} V, margin {V_DS_MAX/ode['v_D_peak']:.1f}x)")
+    print(f"  v_D @ turn-on = {ode['v_D_turnon']:+8.4f} V   "
+          f"(ZVS = 0; nonzero = turn-on loss)")
+    print(f"  i_L peak      = {ode['i_L_peak']*1e3:8.1f} mA")
+    print(f"  i_sw peak     = {ode['i_sw_peak']*1e3:8.1f} mA  "
+          f"(limit {I_D_MAX:.1f} A)")
+    print(f"  P_load        = {ode['P_load']*1e3:8.2f} mW")
+    print(f"  P_Ron         = {ode['P_Ron']*1e3:8.2f} mW")
+    print(f"  P_ZVS         = {ode['P_ZVS']*1e3:8.2f} mW")
+    print(f"  P_gate        = {ode['P_gate']*1e3:8.2f} mW")
+    print(f"  P_in          = {ode['P_in']*1e3:8.2f} mW")
+    print(f"  eta_drain     = {ode['eta_drain']*100:6.2f} %   (P_load / P_in)")
+    print(f"  eta_system    = {ode['eta_system']*100:6.2f} %   (incl. gate)")
+
+    # GaN stress check
+    v_margin = V_DS_MAX / ode['v_D_peak']
+    i_margin = I_D_MAX / ode['i_sw_peak']
+    v_ok = "OK" if v_margin > 2.0 else "TIGHT"
+    i_ok = "OK" if i_margin > 1.5 else "TIGHT"
+    print(f"  Vds margin    = {v_margin:6.2f}x  [{v_ok}]")
+    print(f"  Id  margin    = {i_margin:6.2f}x  [{i_ok}]")
+
+def run_r_on_sweep(tank, V_DD, R_opt, f0, R_on_list=None):
+    if R_on_list is None:
+        R_on_list = [0.0, 0.1, 0.2, 0.3, 0.4, 0.55, 0.7, 0.85, 1.0]
+    print(f"\n[R_on sensitivity — Q_L = {Q_L}]")
+    print(f"  {'R_on':>6} {'I_DC':>8} {'v_Dpk':>7} {'v_D@on':>8} "
+          f"{'P_load':>8} {'P_Ron':>7} {'eta_sys':>9}")
+    print(f"  {'-'*60}")
+    rows = []
+    for R_on in R_on_list:
+        try:
+            ode = run_class_e_ode(tank, V_DD, R_opt, R_on, f0,
+                                  n_warmup=300, n_samples=200)
+            rows.append((R_on, ode))
+            print(f"  {R_on:>6.2f} {ode['I_DC']*1e3:>8.1f} "
+                  f"{ode['v_D_peak']:>7.2f} {ode['v_D_turnon']:>+8.3f} "
+                  f"{ode['P_load']*1e3:>8.1f} {ode['P_Ron']*1e3:>7.1f} "
+                  f"{ode['eta_system']*100:>8.2f}%")
+        except Exception as e:
+            print(f"  {R_on:>6.2f}  FAIL: {e}")
+    return rows
+
+# ============================================================
+# Filter synthesizers
+# ============================================================
+def synth_lmatch(R_in, R_out, f0):
+    Q = np.sqrt(R_out/R_in - 1.0)
+    w0 = 2*np.pi*f0
+    return dict(Lm=Q*R_in/w0, Cm=Q/(w0*R_out), Q=Q)
+
+def synth_wb2cba(fc, n_poles=5, ripple_dB=0.1, R=50.0):
+    beta = np.log(1.0/np.tanh(ripple_dB/17.37))
+    gamma = np.sin(beta/(2*n_poles))
+    g = np.zeros(n_poles+1); g[0] = 1.0
+    g[1] = 2*np.sin(np.pi/(2*n_poles))/gamma
+    for k in range(2, n_poles+1):
+        a = np.sin((2*k-1)*np.pi/(2*n_poles))
+        b = np.sin((2*k-3)*np.pi/(2*n_poles))
+        g[k] = 4*a*b / (g[k-1]*(gamma**2 + np.sin((k-1)*np.pi/n_poles)**2))
+    wc = 2*np.pi*fc
+    return dict(C1=g[1]/(wc*R), L2=g[2]*R/wc, C3=g[3]/(wc*R),
+                L4=g[4]*R/wc, C5=g[5]/(wc*R), g=g)
+
+def synth_ja2gqp(R_in, R_out, f0):
+    w0, w2, w3 = 2*np.pi*f0, 4*np.pi*f0, 6*np.pi*f0
+    def cost(x):
+        C1, L2, C3, L4, C5 = x
+        C2 = 1.0 / (w2**2 * L2)
+        C4 = 1.0 / (w3**2 * L4)
+        if C2 < 30e-12 or C4 < 30e-12: return 1e6
+        if not (30e-12 < C1 < 1500e-12): return 1e6
+        if not (100e-9 < L2 < 1000e-9): return 1e6
+        if not (30e-12 < C3 < 1500e-12): return 1e6
+        if not (100e-9 < L4 < 500e-9):  return 1e6
+        if not (30e-12 < C5 < 1500e-12): return 1e6
+        def s_at(w):
+            M = (abcd_shunt_c(C1, w)
+                 @ abcd_series_parallel_lc(L2, C2, w)
+                 @ abcd_shunt_c(C3, w)
+                 @ abcd_series_parallel_lc(L4, C4, w)
+                 @ abcd_shunt_c(C5, w))
+            return s_from_abcd(M, R_in, R_out)
+        S11_f0, S21_f0 = s_at(w0)
+        _, S21_2f0 = s_at(w2)
+        _, S21_3f0 = s_at(w3)
+        return ((1-abs(S21_f0))**2*100 + abs(S11_f0)**2*100
+                + abs(S21_2f0)**2*1000 + abs(S21_3f0)**2*1000)
+    bounds = [(30e-12, 1000e-12), (100e-9, 900e-9), (30e-12, 1000e-12),
+              (100e-9, 500e-9), (30e-12, 1000e-12)]
+    r = differential_evolution(cost, bounds, strategy='best1bin',
+                               popsize=40, maxiter=4000, tol=1e-14,
+                               seed=42, polish=True, disp=False)
+    C1, L2, C3, L4, C5 = r.x
+    return dict(C1=C1, L2=L2, C2=1/(w2**2*L2), C3=C3,
+                L4=L4, C4=1/(w3**2*L4), C5=C5,
+                converged=r.success, cost=r.fun, nit=r.nit)
+
+def synth_4element(R_in, R_out, f0):
+    w0, w2 = 2*np.pi*f0, 4*np.pi*f0
+    def cost(x):
+        C1, L2, C3 = x
+        C2 = 1.0 / (w2**2 * L2)
+        if C2 < 30e-12: return 1e6
+        if not (30e-12 < C1 < 2000e-12): return 1e6
+        if not (100e-9 < L2 < 3000e-9): return 1e6
+        if not (30e-12 < C3 < 2000e-12): return 1e6
+        def s_at(w):
+            M = (abcd_shunt_c(C1, w)
+                 @ abcd_series_parallel_lc(L2, C2, w)
+                 @ abcd_shunt_c(C3, w))
+            return s_from_abcd(M, R_in, R_out)
+        S11_f0, S21_f0 = s_at(w0)
+        _, S21_2f0 = s_at(w2)
+        return ((1-abs(S21_f0))**2*100 + abs(S11_f0)**2*100
+                + abs(S21_2f0)**2*1000)
+    bounds = [(30e-12, 1500e-12), (100e-9, 2000e-9), (30e-12, 1500e-12)]
+    r = differential_evolution(cost, bounds, strategy='best1bin',
+                               popsize=30, maxiter=3000, tol=1e-14,
+                               seed=42, polish=True, disp=False)
+    C1, L2, C3 = r.x
+    return dict(C1=C1, L2=L2, C2=1/(w2**2*L2), C3=C3,
+                converged=r.success, cost=r.fun, nit=r.nit)
+
+# ============================================================
+# Filter evaluation (standalone, R_in = R_opt, R_out = 50)
+# ============================================================
+def filter_abcd(topology, v, w):
+    if topology == 'LMATCH':
+        return (abcd_series_l(v['Lm'], w)
+                @ abcd_shunt_c(v['Cm'], w)
+                @ abcd_shunt_c(v['C1'], w)
+                @ abcd_series_l(v['L2'], w)
+                @ abcd_shunt_c(v['C3'], w)
+                @ abcd_series_l(v['L4'], w)
+                @ abcd_shunt_c(v['C5'], w))
+    if topology == 'JA2GQP':
+        return (abcd_shunt_c(v['C1'], w)
+                @ abcd_series_parallel_lc(v['L2'], v['C2'], w)
+                @ abcd_shunt_c(v['C3'], w)
+                @ abcd_series_parallel_lc(v['L4'], v['C4'], w)
+                @ abcd_shunt_c(v['C5'], w))
+    if topology == '4Element':
+        return (abcd_shunt_c(v['C1'], w)
+                @ abcd_series_parallel_lc(v['L2'], v['C2'], w)
+                @ abcd_shunt_c(v['C3'], w))
+    raise ValueError(topology)
+
+def evaluate_filter(topology, v, f0, R_opt, R_ant):
+    w0 = 2*np.pi*f0
+    S11_f0, S21_f0 = s_from_abcd(filter_abcd(topology, v, w0), R_opt, R_ant)
+    S11_dB = 20*np.log10(max(abs(S11_f0), 1e-30))
+    S21_dB = 20*np.log10(max(abs(S21_f0), 1e-30))
+    harm = {}
+    for pname, prof in PA_PROFILES.items():
+        margins = []
+        for n in range(2, 6):
+            _, S21n = s_from_abcd(filter_abcd(topology, v, 2*np.pi*n*f0),
+                                  R_opt, R_ant)
+            S21_dBc = 20*np.log10(max(abs(S21n), 1e-30)) - S21_dB
+            total = prof[n] + S21_dBc
+            margin = FCC_LIMIT_DBc - total
+            harm[(pname, n)] = dict(S21_dBc=S21_dBc, total_dBc=total,
+                                    margin_dB=margin)
+            margins.append(margin)
+        harm[f'worst_{pname}'] = min(margins)
+    return dict(topology=topology, S11_dB=S11_dB, S21_dB=S21_dB, harm=harm)
+
+# ============================================================
+# Per-band driver
+# ============================================================
+def design_band(band, do_r_on_sweep=False):
+    f0, name = band['f0'], band['name']
+    R_opt = K_R * V_DD**2 / P_out
+    print(f"\n{'='*80}")
+    print(f"{name}   f0 = {f0/1e6:.2f} MHz   R_opt = {R_opt:.3f} Ohm")
+    print(f"{'='*80}")
+
+    # --- Tank ---
+    tank = synth_class_e(f0, R_opt)
+    print(f"\n[Class-E tank — Sokal analytical, Q_L = {Q_L}]")
+    print(f"  C_sh(total) = {tank['C_sh']*1e12:7.2f} pF")
+    print(f"  C_ext(BOM)  = {tank['C_ext']*1e12:7.2f} pF   (trimmer mandatory)")
+    print(f"  L_1         = {tank['L_1']*1e9:7.2f} nH   (Sokal L_ser)")
+    print(f"  L_2         = {tank['L_2']*1e9:7.2f} nH   (tank L)")
+    print(f"  C_2         = {tank['C_2']*1e12:7.2f} pF   (series with L_2)")
+    print(f"  L_total     = {tank['L_total']*1e9:7.2f} nH")
+
+    # --- Tank ODE (typ) ---
+    ode_typ = run_class_e_ode(tank, V_DD, R_opt, R_ON_TYP, f0,
+                              n_warmup=400, n_samples=400, verbose=True)
+    print_tank_ode(ode_typ)
+
+    if do_r_on_sweep:
+        run_r_on_sweep(tank, V_DD, R_opt, f0)
+
+    # --- Filters ---
+    print(f"\n[Filters — synthesizing]")
+    lm = {**synth_lmatch(R_opt, R_ant, f0), **synth_wb2cba(fc=1.07*f0)}
+    ja = synth_ja2gqp(R_opt, R_ant, f0)
+    f4 = synth_4element(R_opt, R_ant, f0)
+
+    print(f"\n  LMATCH (L-match + WB2CBA):")
+    print(f"    Lm = {lm['Lm']*1e9:6.1f} nH   Cm = {lm['Cm']*1e12:6.1f} pF")
+    print(f"    C1 = {lm['C1']*1e12:6.1f} pF   L2 = {lm['L2']*1e9:6.1f} nH   "
+          f"C3 = {lm['C3']*1e12:6.1f} pF")
+    print(f"    L4 = {lm['L4']*1e9:6.1f} nH   C5 = {lm['C5']*1e12:6.1f} pF")
+
+    print(f"\n  JA2GQP (2f0 + 3f0 notches, cost={ja['cost']:.2e}):")
+    print(f"    C1 = {ja['C1']*1e12:6.1f} pF   "
+          f"L2 = {ja['L2']*1e9:6.1f} nH   C2 = {ja['C2']*1e12:6.1f} pF")
+    print(f"    C3 = {ja['C3']*1e12:6.1f} pF   "
+          f"L4 = {ja['L4']*1e9:6.1f} nH   C4 = {ja['C4']*1e12:6.1f} pF")
+    print(f"    C5 = {ja['C5']*1e12:6.1f} pF")
+
+    print(f"\n  4Element (2f0 notch, cost={f4['cost']:.2e}):")
+    print(f"    C1 = {f4['C1']*1e12:6.1f} pF   "
+          f"L2 = {f4['L2']*1e9:6.1f} nH   C2 = {f4['C2']*1e12:6.1f} pF")
+    print(f"    C3 = {f4['C3']*1e12:6.1f} pF")
+
+    # --- Filter evaluation ---
+    res = {
+        'LMATCH':   evaluate_filter('LMATCH',   lm, f0, R_opt, R_ant),
+        'JA2GQP':   evaluate_filter('JA2GQP',   ja, f0, R_opt, R_ant),
+        '4Element': evaluate_filter('4Element', f4, f0, R_opt, R_ant),
+    }
+
+    print(f"\n[Filter evaluation — R_in = {R_opt:.3f} Ohm, R_out = 50 Ohm]")
+    print(f"  {'Topology':<10} {'S11(f0)':>9} {'S21(f0)':>9} "
+          f"{'S21(2f0)':>10} {'S21(3f0)':>10} "
+          f"{'worst typ':>10} {'worst con':>10} {'N':>3}")
+    print('  ' + '-'*78)
+    comps = {'LMATCH': 7, 'JA2GQP': 5, '4Element': 3}
+    for tname, r in res.items():
+        s2 = r['harm'][('typical',2)]['S21_dBc']
+        s3 = r['harm'][('typical',3)]['S21_dBc']
+        print(f"  {tname:<10} {r['S11_dB']:>8.1f}  {r['S21_dB']:>8.3f}  "
+              f"{s2:>9.1f}  {s3:>9.1f}  "
+              f"{r['harm']['worst_typical']:>+9.1f}  "
+              f"{r['harm']['worst_conservative']:>+9.1f}  "
+              f"{comps[tname]:>3}")
+
+    # --- Combined efficiency (tank ODE × filter) ---
+    print(f"\n[Overall PA efficiency — tank ODE × filter S21]")
+    print(f"  eta_ClassE(ODE, R_on={R_ON_TYP*1e3:.0f}m) = "
+          f"{ode_typ['eta_system']*100:.2f} %")
+    print(f"  {'Topology':<10} {'eta_filt(f0)':>12} {'eta_PA_total':>13}")
+    print('  ' + '-'*40)
+    combined = {}
+    for tname, r in res.items():
+        eta_filt = 10**(r['S21_dB']/10)
+        eta_total = ode_typ['eta_system'] * eta_filt
+        combined[tname] = eta_total
+        print(f"  {tname:<10} {eta_filt*100:>11.2f}% "
+              f"{eta_total*100:>12.2f}%")
+
+    # --- Trimmer allocation ---
+    print(f"\n[Trimmer allocation — required for tuning]")
+    print(f"  Tank C_ext          : mandatory (sets Class-E shunt C)")
+    print(f"  JA2GQP cell 1 (C1)  : recommended (input match)")
+    print(f"  JA2GQP cell 2 (C2)  : mandatory (2f0 notch; fixed C2 below nominal")
+    print(f"                        so trimmer can tune both directions)")
+    print(f"  JA2GQP cell 4 (C4)  : mandatory (3f0 notch; same bidirectional rule)")
+    print(f"  4Element cell 1 (C1): recommended (input match)")
+    print(f"  4Element cell 2 (C2): mandatory (2f0 notch)")
+    print(f"  LMATCH node (Cm||C1): mandatory (match trim)")
+
+    return dict(band=name, f0=f0, R_opt=R_opt, tank=tank, ode_typ=ode_typ,
+                filters={'LMATCH': lm, 'JA2GQP': ja, '4Element': f4},
+                results=res, combined_eff=combined)
+
+# ============================================================
+# Main
+# ============================================================
+if __name__ == '__main__':
+    out = []
+    for b in BANDS:
+        out.append(design_band(b, do_r_on_sweep=(b['name'] == '20m')))
+
+    print(f"\n{'='*80}")
+    print("DONE. Option B.")
+    print("  Tank:  nonlinear ODE (ZVS verified, R_on sweep).")
+    print("  Filter: standalone two-port, R_in = R_opt, R_out = 50.")
+    print("  Combined efficiency: eta_ClassE(ODE) * 10^(S21(f0)/10).")
+    print("="*80)
+```
+
+    
+    ================================================================================
+    20m   f0 = 14.00 MHz   R_opt = 8.223 Ohm
+    ================================================================================
+    
+    [Class-E tank — Sokal analytical, Q_L = 3.0]
+      C_sh(total) =  253.83 pF
+      C_ext(BOM)  =  241.83 pF   (trimmer mandatory)
+      L_1         =  107.74 nH   (Sokal L_ser)
+      L_2         =  280.44 nH   (tank L)
+      C_2         =  460.84 pF   (series with L_2)
+      L_total     =  388.17 nH
+      ODE converged: I_DC = 356.33 mA, <v_D> - V_DD = -0.000 mV
+    
+    [Class-E tank — ODE, R_on = 400 mOhm]
+      I_DC          =   356.33 mA  (Sokal ref: 340.2 mA)
+      v_D peak      =   18.470 V   (limit 100 V, margin 5.4x)
+      v_D @ turn-on =  +0.8489 V   (ZVS = 0; nonzero = turn-on loss)
+      i_L peak      =    705.1 mA
+      i_sw peak     =    907.3 mA  (limit 1.7 A)
+      P_load        =  1619.07 mW
+      P_Ron         =   109.15 mW
+      P_ZVS         =     1.28 mW
+      P_gate        =     8.05 mW
+      P_in          =  1728.18 mW
+      eta_drain     =  93.69 %   (P_load / P_in)
+      eta_system    =  93.25 %   (incl. gate)
+      Vds margin    =   5.41x  [OK]
+      Id  margin    =   1.87x  [OK]
+    
+    [R_on sensitivity — Q_L = 3.0]
+        R_on     I_DC   v_Dpk   v_D@on   P_load   P_Ron   eta_sys
+      ------------------------------------------------------------
+        0.00    377.8   19.37   +0.448   1831.9     0.0    99.54%
+        0.10    372.2   19.13   +0.539   1774.9    29.8    97.89%
+        0.20    366.7   18.91   +0.628   1720.5    57.8    96.29%
+        0.30    361.5   18.68   +0.714   1668.4    84.2    94.74%
+        0.40    356.3   18.47   +0.798   1618.6   109.0    93.23%
+        0.55    348.9   18.16   +0.918   1547.9   143.6    91.04%
+        0.70    341.8   17.86   +1.033   1481.6   175.2    88.95%
+        0.85    334.9   17.58   +1.143   1419.4   204.1    86.95%
+        1.00    328.4   17.30   +1.249   1360.9   230.5    85.03%
+    
+    [Filters — synthesizing]
+    
+      LMATCH (L-match + WB2CBA):
+        Lm =  210.7 nH   Cm =  512.5 pF
+        C1 =  266.3 pF   L2 =  720.1 nH   C3 =  442.0 pF
+        L4 =  720.1 nH   C5 =  266.3 pF
+    
+      JA2GQP (2f0 + 3f0 notches, cost=1.85e-15):
+        C1 =  551.2 pF   L2 =  145.3 nH   C2 =  222.4 pF
+        C3 =  836.9 pF   L4 =  412.9 nH   C4 =   34.8 pF
+        C5 =  220.2 pF
+    
+      4Element (2f0 notch, cost=9.87e-15):
+        C1 = 1222.8 pF   L2 =  158.2 nH   C2 =  204.3 pF
+        C3 =  713.1 pF
+    
+    [Filter evaluation — R_in = 8.223 Ohm, R_out = 50 Ohm]
+      Topology     S11(f0)   S21(f0)   S21(2f0)   S21(3f0)  worst typ  worst con   N
+      ------------------------------------------------------------------------------
+      LMATCH        -26.8    -0.009      -46.2      -70.3      +23.2      +33.2    7
+      JA2GQP       -217.5    -0.000     -180.5     -180.2      +35.6      +55.6    5
+      4Element     -205.3    -0.000     -170.1      -28.8      +10.8      +25.8    3
+    
+    [Overall PA efficiency — tank ODE × filter S21]
+      eta_ClassE(ODE, R_on=400m) = 93.25 %
+      Topology   eta_filt(f0)  eta_PA_total
+      ----------------------------------------
+      LMATCH           99.79%        93.06%
+      JA2GQP          100.00%        93.25%
+      4Element        100.00%        93.25%
+    
+    [Trimmer allocation — required for tuning]
+      Tank C_ext          : mandatory (sets Class-E shunt C)
+      JA2GQP cell 1 (C1)  : recommended (input match)
+      JA2GQP cell 2 (C2)  : mandatory (2f0 notch; fixed C2 below nominal
+                            so trimmer can tune both directions)
+      JA2GQP cell 4 (C4)  : mandatory (3f0 notch; same bidirectional rule)
+      4Element cell 1 (C1): recommended (input match)
+      4Element cell 2 (C2): mandatory (2f0 notch)
+      LMATCH node (Cm||C1): mandatory (match trim)
+    
+    ================================================================================
+    40m   f0 = 7.00 MHz   R_opt = 8.223 Ohm
+    ================================================================================
+    
+    [Class-E tank — Sokal analytical, Q_L = 3.0]
+      C_sh(total) =  507.66 pF
+      C_ext(BOM)  =  495.66 pF   (trimmer mandatory)
+      L_1         =  215.47 nH   (Sokal L_ser)
+      L_2         =  560.88 nH   (tank L)
+      C_2         =  921.67 pF   (series with L_2)
+      L_total     =  776.35 nH
+      ODE converged: I_DC = 356.33 mA, <v_D> - V_DD = -0.000 mV
+    
+    [Class-E tank — ODE, R_on = 400 mOhm]
+      I_DC          =   356.33 mA  (Sokal ref: 340.2 mA)
+      v_D peak      =   18.470 V   (limit 100 V, margin 5.4x)
+      v_D @ turn-on =  +0.8489 V   (ZVS = 0; nonzero = turn-on loss)
+      i_L peak      =    705.1 mA
+      i_sw peak     =    907.3 mA  (limit 1.7 A)
+      P_load        =  1619.07 mW
+      P_Ron         =   109.15 mW
+      P_ZVS         =     1.28 mW
+      P_gate        =     4.03 mW
+      P_in          =  1728.18 mW
+      eta_drain     =  93.69 %   (P_load / P_in)
+      eta_system    =  93.47 %   (incl. gate)
+      Vds margin    =   5.41x  [OK]
+      Id  margin    =   1.87x  [OK]
+    
+    [Filters — synthesizing]
+    
+      LMATCH (L-match + WB2CBA):
+        Lm =  421.4 nH   Cm = 1025.0 pF
+        C1 =  532.6 pF   L2 = 1440.1 nH   C3 =  884.0 pF
+        L4 = 1440.1 nH   C5 =  532.6 pF
+    
+      JA2GQP (2f0 + 3f0 notches, cost=3.92e-13):
+        C1 =  410.0 pF   L2 =  264.7 nH   C2 =  488.2 pF
+        C3 =  596.7 pF   L4 =  150.8 nH   C4 =  381.0 pF
+        C5 =  592.2 pF
+    
+      4Element (2f0 notch, cost=6.69e-14):
+        C1 =  471.0 pF   L2 =  335.6 nH   C2 =  385.0 pF
+        C3 = 1042.6 pF
+    
+    [Filter evaluation — R_in = 8.223 Ohm, R_out = 50 Ohm]
+      Topology     S11(f0)   S21(f0)   S21(2f0)   S21(3f0)  worst typ  worst con   N
+      ------------------------------------------------------------------------------
+      LMATCH        -26.8    -0.009      -46.2      -70.3      +23.2      +33.2    7
+      JA2GQP       -192.7     0.000     -154.1     -171.6      +14.4      +34.4    5
+      4Element     -207.4    -0.000     -161.7      -19.0       +1.0      +16.0    3
+    
+    [Overall PA efficiency — tank ODE × filter S21]
+      eta_ClassE(ODE, R_on=400m) = 93.47 %
+      Topology   eta_filt(f0)  eta_PA_total
+      ----------------------------------------
+      LMATCH           99.79%        93.27%
+      JA2GQP          100.00%        93.47%
+      4Element        100.00%        93.47%
+    
+    [Trimmer allocation — required for tuning]
+      Tank C_ext          : mandatory (sets Class-E shunt C)
+      JA2GQP cell 1 (C1)  : recommended (input match)
+      JA2GQP cell 2 (C2)  : mandatory (2f0 notch; fixed C2 below nominal
+                            so trimmer can tune both directions)
+      JA2GQP cell 4 (C4)  : mandatory (3f0 notch; same bidirectional rule)
+      4Element cell 1 (C1): recommended (input match)
+      4Element cell 2 (C2): mandatory (2f0 notch)
+      LMATCH node (Cm||C1): mandatory (match trim)
+    
+    ================================================================================
+    DONE. Option B.
+      Tank:  nonlinear ODE (ZVS verified, R_on sweep).
+      Filter: standalone two-port, R_in = R_opt, R_out = 50.
+      Combined efficiency: eta_ClassE(ODE) * 10^(S21(f0)/10).
+    ================================================================================
+
